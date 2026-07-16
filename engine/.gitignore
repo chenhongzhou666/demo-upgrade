@@ -1,0 +1,6 @@
+*.wav
+*.mid
+*.musicxml
+*.pdf
+__pycache__/
+output_*/

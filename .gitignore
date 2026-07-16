@@ -1,0 +1,32 @@
+# Python
+.venv/
+.venv-p2/
+__pycache__/
+*.pyc
+*.pyo
+
+# Generated audio/output files (keep test_set WAVs)
+engine/*.wav
+engine/*.mid
+engine/*.musicxml
+engine/*.pdf
+engine/output_*/
+
+# System
+.DS_Store
+
+# Go binary (rebuildable)
+server/demo-upgrade-server
+
+# Swift/Xcode
+client/.build/
+client/DerivedData/
+*.xcuserdata
+*.xcworkspace/xcuserdata/
+
+# IDE
+.idea/
+.vscode/
+
+# Security (contains auth tokens)
+www.bilibili.com_cookies.txt

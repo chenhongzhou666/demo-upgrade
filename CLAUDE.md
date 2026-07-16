@@ -1,0 +1,1347 @@
+# Demo 独自升级 — 识谱 App
+
+## 项目概述
+
+音频/视频输入 → 乐谱输出的智能识谱应用，终极目标为上传 Demo 自动完成编曲。
+
+## 当前进度
+
+### 学习侧
+
+| 模块 | 状态 | 说明 |
+|------|------|------|
+| 音乐学科全景 | ✅ 已学 | 三分钟音乐社《音乐相关学科学习导图》，14个学科体系已整理 |
+| 基础乐理 | ✅ 已学 | 三分钟音乐社《基础乐理 最终版》175课完整教程，知识点已入库 |
+| 和声 | 🔜 待学 | 用户将跟随视频学习，有《和声书籍路线.docx》指南 |
+| 曲式 | 🔜 待学 | 与和声同步推进 |
+| 配器 | 🔜 待学 | 等和声达到①级水平后开始 |
+
+### 工程侧
+
+| 模块 | 状态 | 说明 |
+|------|------|------|
+| 引擎验证 | ✅ v8 | `engine/verify_pipeline.py` (~2200行) — 全 Pipeline P1~P6 已完成，7 步流水线（音高→分析→和弦→简谱→音色→MIDI→五线谱） |
+| SwiftUI 客户端 | ⏳ 待开发 | 目录已创建 |
+| Go API 服务 | ⏳ 待开发 | 目录已创建 |
+| 音频引擎 | ⏳ 待开发 | 验证脚本通过后可工程化 |
+
+### Pipeline 开发路线图（2026-07-14 修订）
+
+> **核心决策（2026-07-14）：改按用户感知价值排序，而非技术依赖排序。**
+> 和声笔记揭示了优先级的真相——能标注和弦功能的谱面，远比节奏精确到16分音符的谱面更有用。
+
+按价值优先级排列：
+
+| 优先级 | 模块 | 现状 | 做什么 | 乐理支撑 |
+|--------|------|------|--------|---------|
+| **P2** | 多音高检测 | ✅ v4 已完成 (2026-07-15) | Spotify Basic Pitch (CoreML) 替代 PYIN，多音检测+和弦识别全链路激活 | 三和弦/七和弦结构 + 转位（第143-160课） |
+| **P5** | 和弦功能分析 | ✅ 已激活 (2026-07-15) | P2 完成后 `identify_chord` + `analyse_tsdt` 在真实音频上工作 | 功能和声 TSDT（和声笔记第2-3课） |
+| **P1** | 节奏量化完善 | ✅ v3 已修 (2026-07-15) | 脉冲网格锚定+长音碎片合并，自创旋律 16 音全部拍位对齐 | 节拍、拍号（基础乐理） |
+| P1b | 拍号推断+小节线 | ✅ v5 已完成 (2026-07-15) | 自相关+模板匹配双通道，支持 2/4、3/4、4/4、6/8，音符标注小节号+拍内位置 | 节拍强弱模式（基础乐理第49-50课）+ 和声笔记第33/35/44课 |
+| P3 | 声源分离 | ✅ v6 已完成 (2026-07-15) | `--separate` 启用 demucs htdemucs (4轨)，各轨独立识谱+和弦分析+汇总结 | 配器（乐器法） |
+| **P6** | 首调简谱输出 | ✅ v7 已完成 (2026-07-15) | 音名 → 首调唱名映射，含八度高音/低音点和调外音升降号 | 唱名/音名/调号（第1-27课） |
+| **P4** | 音色识别 | ✅ v8 已完成 (2026-07-15) | 频谱特征（质心/带宽/滚降/平坦度/起音/谐波比）→ 模板匹配乐器族分类 | 泛音列（第170课） |
+
+> ~~P2 是唯一阻塞项——CREPE/Basic Pitch 一替换 PYIN，和弦识别+功能分析全链路即通。~~ ✅ P2 已交付 (2026-07-15)：Basic Pitch + CoreML 多音检测默认启用，和弦识别+TSDT 功能分析全链路激活。
+
+**已编码实现（`engine/verify_pipeline.py` v8, ~2200行）：**
+
+| 能力 | 算法 | 乐理支撑 |
+|------|------|---------|
+| **多音高检测（P2·2026-07-15）** | Spotify Basic Pitch CNN → CoreML 推理（Apple Silicon），支持同时检测多个音高 | 音名+八度（基础乐理第1-16课） |
+| Hz → MIDI → 音名 → 八度 | PYIN f0 → `librosa.hz_to_midi`（`--pyin` 后向兼容） | 音名+音的分组（基础乐理第1-16课） |
+| 起音检测（替代静音切分） | `librosa.onset.onset_detect` 频谱通量法 | Attack/起音概念（和声笔记第1课：四部和声） |
+| 速度/快慢歌检测 | onset自相关 + 起音间隔中位数 双源融合 | 节奏/节拍（基础乐理） |
+| **节奏量化（v3 新算法）** | IOI中位数→脉冲网格→全序列锚定→推回BPM，消除累积漂移 | 时值体系 |
+| **长音碎片合并（v3 新增）** | `_merge_fragmented_notes` BPM感知合并同音高碎片（gap<1/8拍） | 长音保护 |
+| 调性判断 | Krumhansl-Kessler 音级分布相关法 → 15大调+15小调匹配 | 大调音阶（第17-27课）+ 五度圈（第170课）+ 小调（第161-169课） |
+| 等音正确拼写 | 根据调号上下文选择 #/b | 等音 #C=bD（第1-16课）+ 15个大调调号表 |
+| 五线谱调号注入 | music21 Key + TimeSignature | 基础乐理 + 和声T/S/D大调参考表 |
+| **和弦类型识别** | `identify_chord` — pitch class set 匹配三和弦/七和弦 + 转位 | 和弦结构（第143-160课）：大三/小三/增/减三和弦 + 5种七和弦 |
+| **TSDT 功能分析** | `analyse_tsdt` — 和弦序列 + 调性上下文 → 功能标注 + D→S违规检测 | 功能和声 TSDT（和声笔记第2-3课）：T主/S下属/D属 + 连接规则 |
+| **拍号推断（v5 新增）** | `_infer_time_signature` — 双通道融合（自相关+模板匹配），支持 2/4、3/4、4/4、6/8 | 节拍强弱关系（基础乐理第49-50课）+ 和声笔记第33/35/44课 |
+| **小节线划分（v5 新增）** | `_insert_bar_lines` — 根据拍号为每个音符标注小节号和拍内位置 | 小节/小节线（基础乐理第41课） |
+| **MIDI 拍号嵌入（v5 新增）** | `notes_to_midi` 中写入 `pretty_midi.TimeSignature`，music21 据此正确划分小节 | MIDI 标准 |
+| **声源分离（P3·2026-07-15）** | `--separate` 启用 Meta demucs htdemucs (Hybrid Transformer Demucs)，混合音频 → drums/bass/other/vocals 4轨分离，各轨独立走完整 Pipeline（音高→调性→节奏→和弦→五线谱），输出汇总表 | 配器（乐器法） |
+| **首调简谱（P6·2026-07-15）** | `notes_to_jianpu` — 音名 → 首调唱名映射，以主音为 do(1)，查表法（大调半音偏移 [0,2,4,5,7,9,11]）计算音级；`format_jianpu` 按小节用 \| 分隔输出，和弦用括号括起 | 唱名/音名/调号（第1-27课） |
+| **音色识别（P4·2026-07-15）** | `_extract_note_features` — 每音符提取 8 维频谱特征（质心/带宽/滚降/过零率/平坦度/起音时间/音长/谐波比）；`classify_timbre` — 余弦距离模板匹配 9 种乐器族 + 乐理规则修正，无需训练数据 | 泛音列（第170课） |
+
+**已理解、待编码：**
+
+- 五度圈：近关系调、251进行、三全音替代
+- 四部和声（SATB）规则检查（和声笔记第1课）
+- MFCC 特征可用于增强音色识别精度（当前 v8 用纯频谱特征，MFCC 可作升级）
+
+## 功能模块
+
+### 1. 登录系统
+- 用户账户体系，常规实现
+
+### 2. 音频提取
+- 用户上传**任意格式**音频或视频
+- App 内置**视频转音频**工具（FFmpeg / AVFoundation）
+- 支持格式：MP3, WAV, M4A, MP4, MOV 等
+
+### 3. 曲谱输出
+- 产出**五线谱**（基础）、简谱、六线谱（进阶）
+- 识别并标注**乐器种类**信息
+- 如果是编曲音乐（多乐器混合），难度更高，需声源分离
+
+### 4. 查重功能
+- 配备搜索引擎，分析旋律是否与已有作品相似/抄袭
+- 旋律指纹提取 + 向量检索
+
+### 5. 自动编曲（终极）
+- 用户上传一段 Demo（哼唱/弹奏）
+- 自动完成编曲，输出完整配器版本
+
+## 工作流与工具
+
+### B站字幕提取流水线
+
+```
+用户发B站链接 → yt-dlp + cookies.txt → 提取AI字幕(.srt) → 转为结构化Markdown笔记 → 存入 和声笔记/
+```
+
+**前置条件：**
+- `~/Desktop/Demo独自升级/www.bilibili.com_cookies.txt`（Chrome 插件「Get cookies.txt LOCALLY」导出，一次性配置）
+- `yt-dlp`（已安装）
+- 字幕语言代码：B站 AI 字幕为 `ai-zh`
+
+**命令模板：**
+```bash
+yt-dlp --cookies "~/Desktop/Demo独自升级/www.bilibili.com_cookies.txt" \
+  --write-subs --skip-download --sub-lang ai-zh --convert-subs srt \
+  -o "~/Desktop/Demo独自升级/和声笔记/%(title)s" \
+  "<B站视频URL>"
+```
+
+**注意：** 先用 `--list-subs` 确认字幕可用语言，部分视频字幕代码可能为 `zh` 而非 `ai-zh`
+
+### 笔记协作规则
+
+- 知识点涉及五线谱示例、声部连接图、和弦排列等需要视觉理解的内容时，在笔记中标注 `[需配图]`，用户截图补充
+- 笔记以结构化 Markdown 存入 `和声笔记/`
+- **.srt 原始字幕在生成 .md 笔记后删除**（节省空间，避免冗余）
+- 每次下载新字幕生成笔记后，同步更新 `速查索引.md`
+
+## 目标平台
+
+macOS + iPad + iPhone，SwiftUI 多平台单 Target，CloudKit 跨设备数据同步。
+
+## 推荐架构
+
+```
+SwiftUI 多平台客户端（macOS + iOS）
+  ├── 登录/账户（Sign in with Apple + iCloud）
+  ├── CloudKit 数据同步（曲谱库、项目、设置跨设备）
+  ├── 录音/上传（AVFoundation / AppKit 文件拖拽）
+  ├── 视频转音频（FFmpeg / AVFoundation 封装）
+  ├── 本地轻量识谱（Basic Pitch CoreML 本地推理，离线可用）
+  └── 乐谱渲染（WKWebView + VexFlow/abcjs）
+
+Go API 网关
+  ├── 用户鉴权
+  ├── 查重搜索
+  ├── 重型计算分发（声源分离、编曲等）
+  └── 任务队列 → Python 音频引擎
+
+Python 音频引擎
+  ├── Basic Pitch / CREPE — 音高检测
+  ├── demucs — 声源分离（多乐器场景）
+  ├── music21 — MusicXML 生成
+  └── 编曲模型（终极阶段）
+```
+
+## 目录结构
+
+```
+~/Desktop/Demo独自升级/
+├── CLAUDE.md
+├── engine/          # Python 音频处理（验证脚本 + .venv-p2 虚拟环境）
+├── server/          # Go API 服务（端口 8090，2026-07-15 创建）
+│   ├── main.go
+│   ├── handlers/    # health.go, analyze.go
+│   └── middleware/  # log.go
+├── client/          # SwiftUI App（待开发）
+└── 和声笔记/         # 学习和声的学习笔记
+```
+
+## 音乐学科知识体系（参考「三分钟音乐社」学习导图）
+
+> 此体系为识谱 App 各功能的音乐理论支撑，也作为后续技术选型和算法评估的知识底座。
+> 来源：`~/Desktop/Music/音乐相关学科学习导图.pdf`
+
+### 学科全景
+
+```
+基础乐理（99%学科的根基，难度★☆，1-6月）
+  ├── 视唱练耳 —— "说话"与"听懂话"的能力（★★—★★★★★，终身）
+  ├── 和声     —— 搞创作最重要一环（★★—★★★★★，2月-终身）
+  ├── 曲式     —— 与和声相辅相成（★—★★★★，1周-2年）
+  ├── 配器     —— 乐器法+配器法，经验最重要（★★★—★★★★★，2月-终身）
+  ├── 复调     —— 作曲四大件之一，非痴迷者可不学（★★★★★）
+  ├── 总谱读法 —— 大编制识谱/浓缩扩展能力（★★★★★，半年-终身）
+  ├── 编曲     —— "做伴奏的"，难度被严重低估（★★—★★★★★，终身）
+  ├── 作曲 compose    —— 传统四大件：和声+曲式+配器+复调（★★★★★，终身）
+  ├── 作曲 song writing —— 写旋律，可纯靠感觉也可靠理论（☆—★★★★★，终身）
+  ├── 西方音乐史 / 中国音乐史（★—★★★★）
+  ├── 律学     —— 五度相生/纯律/十二平均律，学术性强（★★★，非必修）
+  └── 音乐审美心理学 —— 新兴交叉学科（★★★☆）
+```
+
+### 识谱 App 功能 ↔ 音乐学科对位
+
+| App 功能 | 对应学科 | 难度 | 说明 |
+|----------|---------|------|------|
+| 单旋律 → 五线谱 | 视唱练耳（练耳） + 基础乐理 | ★★—★★★ | 音高+节奏检测，核心验证点 |
+| 多乐器混合 → 分谱 | 练耳（扒谱） + 配器（乐器法） | ★★★★★ | 需声源分离（demucs）降难度 |
+| 和弦识别 | 和声 | ★★★—★★★★ | 仅识别和弦标记属①级，功能和声分析属②级 |
+| 查重（旋律指纹） | 音乐史 + 曲式分析 | ★★★ | 旋律特征提取 + 向量检索 |
+| 自动编曲 | 四大件（和声+曲式+配器+复调） | ★★★★★ | 终极目标，需分阶段攻克 |
+
+### 关键认知
+
+- **扒谱难度**：扒出所有乐器 ≠ 趴一条主旋律，难度差 10-20 倍
+- **编曲真相**：做伴奏的难度比写主旋律大 50-100 倍，500 个自学编曲养活自己的，能成 3 个算极限
+- **作曲二义**：compose（传统作曲，需四大件）≠ song writer（写旋律，可零基础）
+- **配器核心**：经验 > 理论，需大量听/写/验证循环，软音色降低了自学门槛
+- **和声分级**：① 流行歌功能级数（★★）/ ② 科班 compose 水平（★★★★★），差距约 20 倍
+
+### 推荐教材（作曲方向核心）
+
+| 学科 | 推荐书目 |
+|------|---------|
+| 和声 | 斯波索宾《和声学教程》、勋伯格《和声的结构功能》、吴式锴《和声学教程》 |
+| 曲式 | 斯波索宾《曲式学》、吴祖强《曲式与作品分析》、杨儒怀《音乐的分析与创作》 |
+| 配器 | 阿德勒《配器法教程》、施咏康《管弦乐队乐器法》、杨立青《管弦乐配器教程》 |
+- 作曲 | 赵晓生《传统作曲技法》、勋伯格《作曲基本原理》、欣德米特《作曲技法》 |
+| 复调 | 于苏贤《复调音乐教程》、杜布瓦《对位与赋格教程》 |
+
+## 基础乐理知识库（已学习「三分钟音乐社」175课完整教程）
+
+> 来源：`~/Desktop/Music/基础乐理/基础乐理.pdf`（45.6MB，800+页）
+> 状态：已完整学习，以下是核心知识体系
+
+### 一、基础概念（第1-16课）
+
+| 概念 | 要点 |
+|------|------|
+| **唱名** | do re mi fa sol la si，与 1-7 永久绑定 |
+| **音名** | C D E F G A B，在钢琴上位置固定不变 |
+| **调号 1=C** | 1（唱名do）= C（音名），意味着 1 弹 C 键或唱得和 C 键同高 |
+| **升降号** | # 升高相邻半音，b 降低相邻半音；重升 X、重降 bb |
+| **等音** | 同一键的不同名字，如 #C = bD，用于不同音乐语境 |
+| **纯八度** | 频率比 1:2 的两个音，听感极度相似，音名相同 |
+| **中央C** | 钢琴正中央的 C 键，科学记谱法为 C4，赫尔姆霍茨记谱法为 c1 |
+| **标准音** | A4 = 440Hz，国际标准音高基准 |
+| **半音/全音** | 相邻两键 = 半音（最小距离单位），两半音 = 全音 |
+| **EF 与 BC** | 这两组白键直接相邻（中间无黑键），是所有音程/和弦判断的核心锚点 |
+| **音级** | 基本音级 = CDEFGAB（7个），变化音级 = 带升降号的（28个） |
+
+### 二、大调与音阶（第17-27课）
+
+**自然大调：7个音，按「全全半全全全半」排列**
+
+```
+C大调: C  D  E F  G  A  B C
+       全  全  半  全  全  全  半
+```
+
+- **15个大调**：12个键位中3个有等音调（#C/bD, #F/bG, B/bC）
+- **音阶** = 调式中的音从主音到主音有序排列，三个要点：有始有终、方向性、完整性
+- **相对音高**：以任意音为 do，根据「全全半全全全半」唱出其他音，这是视唱练耳的核心能力
+- **不同调号的意义**：匹配人声/乐器音域，匹配作品情绪与质感
+
+### 三、音程（第122-142课）★ 识谱核心
+
+**音程 = 两个音之间的「度数」距离**
+
+判断方法：从低到高数音名字母，有几个字母就是几度（忽略升降号）。
+
+| 度数 | 类型 | 音数 |
+|------|------|------|
+| 一度 | 纯一度 | 0 |
+| 二度 | 小二度/大二度 | 0.5 / 1 |
+| 三度 | 小三度/大三度 | 1.5 / 2 |
+| 四度 | 纯四度 | 2.5 |
+| 五度 | 纯五度 | 3.5 |
+| 六度 | 小六度/大六度 | 4 / 4.5 |
+| 七度 | 小七度/大七度 | 5 / 5.5 |
+| 八度 | 纯八度 | 6 |
+
+**命名规律**：二三六七度用「大/小」，一四五八度用「纯」
+- 比「小」还小半音 → 减；比「大」还大半音 → 增
+- 比「纯」还小半音 → 减；比「纯」还大半音 → 增
+
+**协和度排序**：纯一八度 > 纯四五度 > 大小三六度 > 大小二七度 > 增减音程
+
+### 四、和弦（第143-160课）★ 识谱核心
+
+#### 三和弦（3个音，三度叠置）
+
+| 类型 | 结构（从下往上） | 根音-五音 | 听感 |
+|------|-----------------|----------|------|
+| 大三和弦 | 大三度 + 小三度 | 纯五度 | 明亮、温馨 |
+| 小三和弦 | 小三度 + 大三度 | 纯五度 | 黯淡、忧伤 |
+| 增三和弦 | 大三度 + 大三度 | 增五度 | 扩张的紧张 |
+| 减三和弦 | 小三度 + 小三度 | 减五度 | 收缩的紧张 |
+
+**转位**：第一转位 = 六和弦（低音=三音），第二转位 = 四六和弦（低音=五音）
+
+#### 七和弦（4个音，三度叠置）
+
+命名规则：第一个字 = 根三五音是「什么」三和弦，第二个字 = 根音-七音是「什么」七度
+
+| 全称 | 简称 | 结构特征 |
+|------|------|---------|
+| 大大七和弦 | 大七和弦 (XM7) | 大三+大三+小三 = 大七度 |
+| 大小七和弦 | 属七和弦 (X7) | 大三+小三+小三 = 小七度 |
+| 小小七和弦 | 小七和弦 (Xm7) | 小三+大三+小三 = 小七度 |
+| 减小七和弦 | 半减七/小七降五 (XØ7) | 减三+大三 = 小七度 |
+| 减减七和弦 | 减七和弦 (X°7) | 减三+小三 = 减七度 |
+
+#### 功能和声（TSDT体系）
+
+在大调中：
+- **I 级（T 主功能）**：大三和弦，稳定 —— 音乐的归宿
+- **IV 级（S 下属功能）**：大三和弦，紧张
+- **V 级（D 属功能）**：大三和弦，紧张 → 强烈倾向主功能
+- **ii**：小三和弦，偏下属功能 (Sii)
+- **vi**：小三和弦 (TSvi)，I 和 IV 的桥梁
+- **vii°**：减三和弦，偏属功能 (Dvii°)
+
+**和声底层逻辑**：稳定(T) → 紧张(S或D) → 稳定(T) → 循环
+
+#### 和弦固定标记法
+
+- **大三和弦**：X 或 XM（如 C、CM）
+- **小三和弦**：Xm 或 X-（如 Cm、C-）
+- **增三和弦**：Xaug 或 X+（如 Caug、C+）
+- **减三和弦**：Xdim 或 X°（如 Cdim、C°）
+- **斜杠和弦**：X/Y = 和弦X + 低音Y（如 C/E 表示大三和弦第一转位）
+
+### 五、调式（第161-169课）
+
+#### 大调式
+- **自然大调**：全全半全全全半（基准）
+- **和声大调**：降VI级，偶尔使用的局部技术
+- **旋律大调**：下行时降VI、VII级
+
+#### 小调式
+- **自然小调**：全半全全半全全（首调 6-7-1-2-3-4-5-6）
+- **和声小调**：升VII级 → V级属和弦变「大」性质 → 弥补自然小调缺陷
+- **旋律小调**：上行升VI+VII级 → 消除和声小调的增二度
+
+#### 五声性调式（中国民族音乐）
+- 正音：宫(1) 商(2) 角(3) 徵(5) 羽(6) —— 无半音，听觉协和
+- 偏音：清角(4)、变徵(#4)、变宫(7)、闰(b7)
+- 六声 = 五声 + 一个偏音；七声 = 五声 + 两个偏音（清乐/雅乐/燕乐）
+
+#### 中古调式（7种）
+以首调的哪个音作为主音来命名：Ionian(1) → Dorian(2) → Phrygian(3) → Lydian(4) → Mixolydian(5) → Aeolian(6=自然小调) → Locrian(7)
+- 其中 Ionian=自然大调, Aeolian=自然小调，因和声优势脱颖而出
+- 其他调式各有「特征音」，如 Dorian 的「多利亚六度」、Lydian 的「利底亚四度」
+
+### 六、进阶概念（第170-175课）
+
+- **五度圈**：每提高纯五度多1个升号，降低纯五度多1个降号。用途：找调号、近关系调、调内和弦、251进行、三全音替代
+- **泛音列**：复合音的泛音结构决定音色，基音+泛音的振幅差异构成不同乐器的音色特征
+- **移调乐器**：某些乐器记谱音高 ≠ 实际发音音高（如 bB 调小号、F 调圆号）
+
+### 七、识谱 App 直接关联的技术要点
+
+| App 需求 | 乐理支撑 | 对应的计算任务 |
+|----------|---------|---------------|
+| 音高检测 → 音符名 | 音名 + 音的分组 + 升降号 | Hz → MIDI note → 音名+八度标记 |
+| 旋律 → 五线谱 | 音程 + 调号 + 大调音阶规则 | 音符序列 → 调性判断 → 五线谱排布 |
+| 和弦识别 | 三和弦/七和弦结构 + 转位 | 多音高集合 → 和弦类型匹配 |
+| 调性判断 | 大调/小调/五声性/中古调式 | 音符统计 → 调式模式匹配 |
+| 简谱输出 | 唱名 + 调号 + 高音点/低音点 | 音名 → 首调唱名映射 |
+| 查重（旋律指纹） | 音程序列 + 节奏特征 | 相对音高序列 → 特征哈希 |
+
+
+## Pipeline 架构（v3, 2026-07-15）
+
+```
+音频/视频
+  │
+  ├─ [1] FFmpeg 提取音频（视频输入时）
+  │
+  ├─ [2] detect_pitches() — 音高检测（v4: 默认 Basic Pitch）
+  │     ├─ detect_pitches_basic_pitch  → Spotify Basic Pitch CNN (CoreML) 多音检测
+  │     ├─ detect_pitches_pyin (--pyin) → librosa.pyin 单音（旧版兼容）
+  │     └─ 按起音分段 + 中位数音高     → 原始音符列表（多音=和弦自然分组）
+  │
+  ├─ [3] analyse_music() — 音乐分析
+  │     ├─ 3a. 速度检测: onset自相关 + 起音间隔 双源融合 → BPM
+  │     ├─ 3b. 拍格构建: 从首个起音 + BPM 均匀拍格
+  │     ├─ 3c. 调性检测: Krumhansl-Kessler 音级分布相关 → 30调匹配(15大+15小)
+  │     ├─ 3d. 拍号: 默认 4/4（后续自动推断）
+  │     ├─ 3e. 节奏量化(v3): IOI中位数→脉冲网格→全序列锚定→推回BPM
+  │     ├─ 3e½. 长音合并: BPM感知合并同音高碎片(gap<1/8拍)
+  │     └─ 3f. 等音修正: 根据调号正确拼写音名
+  │
+  ├─ [3.5] 和弦分析（v4: P2 激活后全自动，无需 mock）
+  │     ├─ identify_chord(): pitch class set → 和弦类型 + 转位 + 符号
+  │     ├─ group_notes_into_chords(): 同起音时刻（容差 0.12s）的音符分组
+  │     └─ analyse_tsdt(): 和弦序列 + 调性 → T/S/D 功能 + D→S违规检测
+  │
+  ├─ [4] notes_to_midi() — 写入 MIDI（使用检测到的 BPM）
+  │
+  └─ [5] midi_to_sheet() — 五线谱
+        ├─ music21 Key      → 调号
+        ├─ music21 TimeSig  → 拍号
+        └─ MusicXML + LilyPond 输出
+```
+
+### 关键设计决策
+
+| 决策 | 原因 |
+|------|------|
+| onset 切分而非 NaN 切分 | 连奏/混响/弱衰减下无静音，onset 更符合音乐物理事实 |
+| 拍格从 BPM 推算而非 beat_track | beat_track 对短音频对齐不可靠 |
+| BPM 双源融合 | 均匀节奏用起音间隔更准，复杂节奏用自相关更鲁棒 |
+| 等音调简化（Db 而非 C#） | 优先选升降号较少的写法（|fifths| 更小） |
+| 调性用 KK 相关而非规则匹配 | 对不完整音阶/真实演奏更鲁棒 |
+| **用数据替代逻辑** | 有限组合（如 24 个大小调）直接用 dict 查表，而非 if/else 推导 |
+| **用价值排序而非依赖排序** | 和弦功能标注（T/S/D）对用户比16分音符精度更有用，P2+P5 应排在 P1 之前 |
+| **查表法做音级映射** | `(root_pc - tonic_pc) % 7` 是错的（音级不是均匀半音分布），必须用大调音阶半音偏移 [0,2,4,5,7,9,11] + 反向查表 `pc_to_degree` |
+| **和声笔记=代码数据源** | 15 个大调的 TSD 和弦表、连接规则（D→S禁止）、三和弦/七和弦结构，全部直接编码为 dict/查找表，不需要推导 |
+| **节奏量化 v3: 脉冲从 IOI 来** | 先听音名→再写长短→中位数得脉冲→全序列独立锚定，消除累积漂移 |
+| **碎片合并用 BPM 感知** | 长音振幅波动被 onset 误切→同音高+gap<1/8拍→合并 |
+| **共享常量提取** | `LETTER_PC`, `NAME_TO_PC`, `SHARP_ORDER`, `FLAT_ORDER`, `FIFTHS_MAP`, `KEY_MAP`, `NOTE_VALUES` 提取到模块顶部，标注乐理出处 |
+
+### 代码精简记录（2026-07-14 → 2026-07-15，853→947 行）
+
+**原则：用数据替代逻辑。** 有限组合直接用 dict/列表查表，不写推导逻辑。
+
+| 函数 | 变化 | 技巧 |
+|------|------|------|
+| `_detect_key` | 113→32 行 | 24 个 (tonic, mode) 组合直接用 `KEY_MAP` dict 查表，替代 major/minor 两套 enharmonic 分支 |
+| `_respell_notes` | 111→42 行 | 预计算 `spelling[12]` 数组（每个 pc 的最佳字母+升降号），替代逐音调用闭包 `_pc_to_spelling`；删除未使用的 `diatonic_pcs` 计算 |
+| `_quantize_rhythm` | 去掉未用变量 | `grid_16th` 计算了但从未使用 |
+| `notes_to_midi` | 去掉未用解构 | `key_name`/`mode`/`fifths` 仅用于已删除的打印语句 |
+
+**为什么 dict 查表优于推导逻辑：**
+- 24 个调的组合是有限常量，不随输入变化
+- 查表是 O(1) 纯数据，推导是 O(n)×分支的代码
+- 出 bug 时查表一眼看出错在哪一行，推导逻辑要逐行追踪
+- 代码量：32 行 dict vs 113 行 if/else 分支
+
+> 这个技巧在整个 Pipeline 中反复使用：`KEY_MAP`（调性）、`LETTER_PC` + `SHARP_ORDER` + `FLAT_ORDER`（等音拼写）、`NOTE_VALUES`（标准时值表）。当数据是有限的常量时，写成表而非写成代码。
+
+### v3 重构记录（2026-07-15）
+
+| 改动 | 变化 | 技巧 |
+|------|------|------|
+| 提取共享常量 | +55行模块顶部 | `LETTER_PC`, `NAME_TO_PC`, `SHARP_ORDER`, `FLAT_ORDER`, `FIFTHS_MAP`, `KEY_MAP`, `NOTE_VALUES` — 各只定义一次，标注乐理出处 |
+| `_detect_key` | -12行 | 删局部 `KEY_MAP`，引用模块级 |
+| `_respell_notes` | -14行 | 删局部 `_FIFTHS`/`SHARP_PCS`/`FLAT_PCS`/`LETTER_PC`，引用 `FIFTHS_MAP`/`SHARP_ORDER`/`FLAT_ORDER` |
+| `_quantize_rhythm` | -11行局部 + 重写算法 | 删局部 `NOTE_VALUES`；新算法：IOI中位数→脉冲网格→全序列锚定→推回BPM |
+| `_merge_fragmented_notes` | +50行 新增 | BPM感知同音高碎片合并（gap<1/8拍 + exact MIDI match），消除长音onset误切 |
+| `analyse_tsdt` | -35行 + latent bug修复 | 删未使用的 `_FIFTHS`/`SHARP_PCS`/`FLAT_PCS`/`key_acc`/`_PC`/`_name_to_pc`；tonic_pc 改用 `NAME_TO_PC` 查表（原sharps-only数组在 Bb/Eb/Ab/Db 等降号调中会索引错误 crash） |
+
+### v4 P2 多音检测（2026-07-15）
+
+**核心变更：PYIN → Basic Pitch (Spotify + CoreML)**
+
+| 改动 | 变化 | 说明 |
+|------|------|------|
+| `detect_pitches_basic_pitch` | +60行 新增 | Basic Pitch CNN 多音检测（CoreML 后端，Apple Silicon 原生），替代 PYIN 单音限制 |
+| `detect_pitches` → `detect_pitches_pyin` | 重命名 | PYIN 后端保留，`--pyin` 标志可回退 |
+| `main()` | 重构 | `--pyin` 标志分发；Basic Pitch 模式下移除 mock chord data（真实多音检测） |
+| `_make_note` | +5行 | 添加 `harmonics` 参数——和弦测试音频加入 2nd/3rd 泛音（Basic Pitch 需真实音色） |
+| `group_notes_into_chords` | 重构 | 改用 `start_sec`（原始时间）替代 `beat_pos`（量化拍位）分组；容差从 0.05→0.12s |
+| `midi_to_sheet` | +3行 | 处理 music21 Chord 对象（`hasattr('pitches')`分支），避免 AttributeError |
+| Python 环境 | 新建 .venv-p2 | Python 3.13 + basic-pitch 0.4.0 + coremltools 9.0（Python 3.14 暂不兼容） |
+
+**验证结果：**
+
+| 模式 | 命令 | 结果 |
+|------|------|------|
+| Basic Pitch（默认）音阶 | `python3 verify_pipeline.py` | C major, 120 BPM, 8音全对 |
+| Basic Pitch 和弦 | `python3 verify_pipeline.py --chords` | C→F→G→C = T→S→D→T |
+| PYIN 后向兼容 | `python3 verify_pipeline.py --pyin` | C major, 118 BPM |
+| PYIN mock 和弦 | `python3 verify_pipeline.py --pyin --chords` | T→S→D→T（mock 数据） |
+
+### v5 P1b 拍号推断+小节线（2026-07-15）
+
+**核心变更：自动推断拍号（2/4、3/4、4/4、6/8）+ 音符标注小节线**
+
+| 改动 | 变化 | 说明 |
+|------|------|------|
+| `_infer_time_signature` | +160行 新增 | 双通道融合（自相关候选+模板匹配精排），支持拍级onset能量+起音密度+低音变化三特征 |
+| `_insert_bar_lines` | +30行 新增 | 为每个量化音符添加 `measure` 和 `beat_in_measure` 字段 |
+| `_generate_ts_test_audio` | +80行 新增 | 生成 2/4、3/4、6/8 测试音频（含强弱拍重音区分） |
+| `analyse_music()` 第518行 | 重构 | 硬编码 `'4/4'` → `_infer_time_signature` 自动推断 |
+| `notes_to_midi()` | +5行 | 嵌入 `pretty_midi.TimeSignature`，music21 据此正确划分小节 |
+| `main()` | +10行 | `--ts 2/4\|3/4\|6/8` CLI 参数 |
+
+**算法设计：**
+
+```
+拍级重音序列        自相关候选            模板匹配精排
+beat_accents[]  →  peak@lag=N  →  候选拍号 vs 理论强弱模板
+                                    ↓
+                              downbeat_ratio × 0.6
+                            + pattern_corr × 0.4
+                                    ↓
+                              最佳拍号 + 置信度
+```
+
+**鉴别逻辑：**
+- **2/4 vs 4/4**：位置 2（叠入 4/4 的次强拍）强度 ≈ 位置 0（强拍）→ 2/4
+- **6/8 vs 2/4**：检查 lag=6 候选 + 3 拍子子模式（次强拍在第4拍）
+- **6/8 vs 3/4**：lag=6 候选 + 位置 3（次强拍）明显强于位置 1,2,4,5
+
+**常量表（乐理出处）：**
+- `_METER_TEMPLATES`：2/4 `[1.0,0.4]`, 3/4 `[1.0,0.4,0.4]`, 4/4 `[1.0,0.4,0.7,0.4]`, 6/8 `[1.0,0.3,0.3,0.6,0.3,0.3]`
+- `_CANDIDATE_NUMERATORS`：`[2, 3, 4, 6]`
+
+**验证结果：**
+
+| 模式 | 命令 | 结果 |
+|------|------|------|
+| 默认（C大调音阶） | `python3 verify_pipeline.py` | 4/4, 置信度=0.67 |
+| 3/4 圆舞曲 | `python3 verify_pipeline.py --ts 3/4` | 3/4, 置信度=0.81, T→S→D→T |
+| 6/8 复合拍 | `python3 verify_pipeline.py --ts 6/8` | 6/8, 置信度=0.77, T→D→S→T |
+| 2/4 进行曲 | `python3 verify_pipeline.py --ts 2/4` | 2/4, 置信度=0.45 |
+| 自创旋律 | `python3 verify_pipeline.py ~/Desktop/自创旋律.mp3` | 2/4, 置信度=0.72（原谱 4/4，2/4 为同等有效解读） |
+| PYIN 后向兼容 | `python3 verify_pipeline.py --pyin --ts 3/4` | 4/4（PYIN 单音检测丢失和弦对比信息，预期内） |
+
+**边界与局限：**
+- 音符 < 4 个拍位时回退 4/4（置信度=0）
+- 5/4、7/8 等复拍号暂不支持（v1 范围外）
+- 变拍号（中途换拍）暂不支持
+- PYIN 单音检测下强弱对比弱化，拍号推断精度下降
+
+### v6 P3 声源分离（2026-07-15）
+
+**核心变更：demucs htdemucs (Meta Hybrid Transformer Demucs) 声源分离集成**
+
+| 改动 | 变化 | 说明 |
+|------|------|------|
+| `_get_demucs_model` | +20行 新增 | 模块级懒加载单例（~80MB 权重，首次从 HuggingFace Hub 下载） |
+| `separate_sources` | +100行 新增 | 44100Hz stereo 加载 → CNN 推理 → 4轨分离 → 降采样 22050Hz mono → 写入临时 WAV |
+| `_run_pipeline_stem` | +45行 新增 | 提取自 main()，单轨 Pipeline：detect→analyse→chords→midi→sheet |
+| `_generate_band_test_audio` | +80行 新增 | 多乐器混合测试音频（Bass低音+键盘琶音+打击乐噪声），配合 `--band --separate` |
+| `main()` | 重构 | `--separate [cpu\|mps]` 标志分发；分离模式下遍历各 stem 后打印汇总表 |
+| `pkg_resources` shim | +12行 | setuptools 83+ 移除了 pkg_resources，resampy（basic-pitch 依赖）需要它。用 importlib.resources 替代 |
+
+**新增 CLI 标志：**
+
+```bash
+--separate [cpu|mps]   # 启用 demucs 声源分离（默认 cpu）
+--band                 # 生成多乐器混合测试音频（配合 --separate）
+```
+
+**数据流：**
+
+```
+[1] 音频输入 (22050Hz mono)
+  ↓
+[1.5] separate_sources()
+  ├─ load 44100Hz stereo
+  ├─ demucs CNN → 4 stems (drums/bass/other/vocals)
+  ├─ stereo→mono (均值)
+  ├─ 44100→22050Hz (scipy.resample)
+  └─ 静音检测 (-35dB 阈值) → 写入临时 WAV
+  ↓
+[2→5] 每个非静音 stem 走 _run_pipeline_stem()
+       detect → analyse → chords → midi → sheet
+  ↓
+汇总表: 各 stem 的调性/BPM/拍号/和弦进行
+```
+
+**验证结果：**
+
+| 模式 | 命令 | 结果 |
+|------|------|------|
+| 向后兼容 | `python3 verify_pipeline.py` | C major, 120 BPM, 8音全对 (无变化) |
+| 多乐器分离 | `python3 verify_pipeline.py --band --separate` | bass→C major 117 BPM, other→C major 117 BPM, 2轨检出, drums/vocals 静音跳过 |
+
+**已知局限：**
+- demucs 对纯合成音频分离效果有限（训练数据为真乐器录音），合成测试音频中有 bass→other 串音
+- 钢琴独奏分离无意义（所有内容进入 other 轨，drums/bass/vocals 为静音）
+- `--pyin --separate` 不兼容（自动切换为 Basic Pitch）
+- 依赖 demucs + torch（安装：`pip install demucs`，~80MB 模型首次下载）
+- MPS 加速暂不默认启用（某些 Mac 上 demucs MPS 推理不稳定），需 `--separate mps`
+
+### v7 P6 首调简谱输出（2026-07-15）
+
+**核心变更：音名 → 首调唱名（1-7）+ 八度点 + 调外音升降号**
+
+| 改动 | 变化 | 说明 |
+|------|------|------|
+| `notes_to_jianpu` | +60行 新增 | 为每个音符添加 `jianpu` 字段，查表法（大调半音偏移 [0,2,4,5,7,9,11]）从主音出发计算音级 |
+| `_find_nearest_degree` | +20行 新增 | 调外音半音处理：找最近的调内音级 + 标注升降号，等距时优先升号 |
+| `format_jianpu` | +45行 新增 | 按小节分组，`\|` 分隔，和弦用 `()` 括起，标题标注 `1 = 调名` |
+| `main()` / `_run_pipeline_stem()` | +6行 | 和弦分析后调用简谱函数，打印输出 |
+
+**算法设计（乐理来源：基础乐理第161-169课「首调 6-7-1-2-3-4-5-6」）：**
+
+```
+大调: tonic → 大调偏移表 [0,2,4,5,7,9,11] → degree → 简谱 1-7
+小调: tonic + 3半音 → 关系大调 → 同一张偏移表 → 主音天然 = la(6)
+
+例：a小调 → 关系大调C → 从C4=60出发
+  a4(69): offset=9 → pc=9 → degree=5 → "6"        (八度=0)
+  b4(71): offset=11→ pc=11→ degree=6 → "7"        (八度=0)
+  c5(72): offset=12→ pc=0 → degree=0 → "1̇"       (八度=+1)
+  → 6 7 1̇ 2̇ 3̇ 4̇ 5̇ 6̇  ✅
+```
+
+**八度点规则（乐理出处：基础乐理第1-16课 音的分组）：**
+- 以 tonic 在 octave 4 为无点基准（do 不加点）
+- 每高一个八度：数字上方加一个点（U+0307 combining dot above → 1̇ 2̇）
+- 每低一个八度：数字下方加一个点（U+0323 combining dot below → 1̣ 2̣）
+
+**查表常量：**
+- 大调偏移：`[0, 2, 4, 5, 7, 9, 11]`（全全半全全全半）
+- 小调偏移：`[0, 2, 3, 5, 7, 8, 10]`（全半全全半全全，自然小调）
+
+**验证结果：**
+
+| 模式 | 命令 | 简谱输出 |
+|------|------|---------|
+| C大调音阶 | `python3 verify_pipeline.py` | `\| 1 2 3 4 \| 5 6 7 1̇ \|` |
+| C大调和弦 | `python3 verify_pipeline.py --chords` | `\| (5 3 1) ... \|` 和弦用括号括起 |
+| 自创旋律 | `python3 verify_pipeline.py ~/Desktop/自创旋律.mp3` | C=1, 八度和弦标记正确，`1̇ 3̇ 2̇` 正确标注高音点 |
+| 3/4 拍号 | `python3 verify_pipeline.py --ts 3/4 --chords` | 按 3/4 小节正确划分 |
+
+**边界与局限：**
+- 和声/旋律小调（升VI/VII级）暂统一按自然小调偏移表处理，升号音会被标为半音（如 #6, #7）
+- 简谱节奏符号（下划线、附点）未实现——仅输出音高，时值信息暂不在简谱中体现
+- 显示依赖 Unicode 组合字符（U+0307/U+0323），某些终端字体可能渲染异常
+- 等音调（#C/bD 等）的首调唱名等价（do 都是同一个 pitch class），调名不影响输出
+
+### v8 P4 音色识别（2026-07-15）
+
+**核心变更：泛音列理论 → 频谱特征提取 → 模板匹配乐器族分类**
+
+| 改动 | 变化 | 说明 |
+|------|------|------|
+| `_extract_note_features` | +70行 新增 | 从每个音符音频片段提取 8 维频谱特征（质心/带宽/滚降/过零率/平坦度/起音/音长/谐波比），全部为物理可解释量 |
+| `_INSTRUMENT_TEMPLATES` | +15行 新增 | 9 种乐器族的归一化特征模板（Piano/Guitar/Violin/Flute/Trumpet/Voice/Bass/Percussion/Synth），来自 MIR 文献 + 泛音列理论 |
+| `classify_timbre` | +60行 新增 | 余弦距离匹配 + 4 条乐理规则修正（打击乐/低音/纯合成音/铜管），置信度计算 |
+| `_run_timbre_analysis` | +30行 新增 | 整轨遍历标注 + Counter 汇总 |
+| `_print_timbre_summary` | +15行 新增 | 打印主要乐器及占比、其他乐器分布 |
+| `main()` / `_run_pipeline_stem()` | +6行 | 简谱后调用音色分析 |
+
+**特征选择（全部基于泛音列理论，天然 [0,1] 范围）：**
+
+| 特征 | 物理含义 | 乐器区分能力 |
+|------|---------|-------------|
+| 频谱质心(centroid) | 音色的「亮/暗」程度 | Bass<500Hz < Piano<1200Hz < Violin<2500Hz |
+| 频谱带宽(bandwidth) | 泛音分布宽度 | 纯音<200Hz < 管乐<800Hz < 打击乐>2000Hz |
+| 频谱滚降(rolloff) | 85% 能量集中的截止频率 | 高频衰减斜率 |
+| 过零率(zcr) | 噪声 vs 谐波比例 | 谐波<0.1，噪声>0.3 |
+| 频谱平坦度(flatness) | 音调性 vs 噪声性 | 正弦波≈0，白噪声→1 |
+| 起音时间(attack_ms) | 弹拨/拉弦/吹奏特征 | 拨弦<20ms < 钢琴<30ms < 拉弦>50ms |
+| 音长(duration_ms) | 持续/瞬态 | 打击乐<100ms，持续音>300ms |
+| 谐波比(harmonic_ratio) | 自相关周期性 | 谐波音≈1，非谐波/噪声≈0 |
+
+**乐器模板（9族，归一化到 [0,1]）：**
+
+```
+            centr  bw    roll  zcr   flat  atk   dur   harm
+Piano       .35   .45   .40   .12   .08   .15   .35   .85    泛音丰富、宽带、中等起音
+Guitar      .45   .48   .48   .18   .15   .10   .30   .75    明亮、快起音、中等泛音
+Violin      .55   .38   .55   .14   .10   .30   .50   .82    高亮、窄带、慢起音(拉弦)
+Flute       .65   .22   .60   .08   .04   .25   .40   .92    最亮、最窄带、极纯泛音(正弦波似)
+Trumpet     .60   .42   .58   .13   .08   .08   .30   .78    高亮、快起音(唇振)
+Voice       .42   .40   .45   .18   .16   .28   .45   .68    中等、共振峰结构
+Bass        .12   .28   .22   .10   .05   .18   .40   .65    极低质心、泛音稀少
+Percussion  .38   .75   .70   .55   .60   .03   .08   .08    最宽带、极短、极噪(无泛音列)
+Synth       .32   .15   .30   .06   .02   .12   .35   .96    最窄带、极纯、无噪声
+```
+
+**乐理规则修正（4条）：**
+
+1. **极短+高噪声→打击乐**（鼓/镲无持续泛音列，噪声主导频谱）
+2. **极低质心+谐波→Bass**（基音在泛音列最低频段，50-300Hz）
+3. **极窄带宽+极高谐波比→Synth**（纯正弦波 = 无泛音衰减 = 泛音列缺失）
+4. **高质心+快起音→铜管**（唇振激发，高频泛音丰富）
+
+**验证结果：**
+
+| 场景 | 命令 | 主要乐器 |
+|------|------|---------|
+| C大调音阶 合成 | `python3 verify_pipeline.py` | Synth (100%) — 正确，正弦波+泛音合成 |
+| 和弦 合成 | `python3 verify_pipeline.py --chords` | Piano (68%) + Synth(4) + Bass(6) + Guitar(2) — 和弦泛音更丰富，接近钢琴 |
+| 3/4 拍号 合成 | `python3 verify_pipeline.py --ts 3/4 --chords` | Synth (68%) + 混合 — 强弱拍对比感知正确 |
+| 自创旋律 .mp3 | `python3 verify_pipeline.py ~/Desktop/自创旋律.mp3` | Synth (94%) — 录制/MIDI 渲染默认音色 |
+| PYIN 后向兼容 | `python3 verify_pipeline.py --pyin` | Bass(50%)+Synth(4) — PYIN 精度低，预期内 |
+| **demucs bass 轨** | `--band --separate` | Bass (89%) — 低音轨正确识别 |
+| **demucs other 轨** | `--band --separate` | Synth (84%) — 琶音/键盘轨，合成音频正确 |
+
+**边界与局限：**
+
+- 模板匹配无训练数据——依赖文献值的归一化特征，对真实录音的分类精度中等；提升精度需加 MFCC 或用标注数据训练分类器
+- 合成音频天然接近 Synth/Piano 模板（带宽窄、谐波纯净），真实乐器的泛音不规则性更好区分
+- 同一乐器不同音域/奏法的特征差异较大（如小提琴高把位 vs 低把位），当前每轨取多数投票
+- Voice 模板区分度最弱——共振峰结构（formant）需专门的特征（MFCC 高阶系数捕获），当前纯频谱特征不够精细
+- 不支持复合音色（如失真吉他 = Guitar + Synth-like 噪声），只能选最佳匹配
+
+### 调性测试覆盖（2026-07-15）
+
+| 类别 | 已测 | 结果 |
+|------|------|------|
+| 大调（升号） | C, G, D, A | ✅ 调性+等音全对 |
+| 大调（降号） | F, Bb, Eb | ✅ 调性+等音全对 |
+| 自然小调 | a, e, d, b | ✅ 正确区分关系大小调 |
+| 和声小调 | a, e, d | ✅ 调性+等音全对 |
+| 自创旋律 | 16音 MP3 | ✅ P1修复后拍位全对齐，BPM=89(实际90)，长音不再切碎 |
+
+**暂缓的调式：** 五声调式（5音体系，KK不适用）、中古调式（需额外profile）、旋律小调（上下行不对称）
+
+
+### 识谱 Pipeline 测试音频音高全错（2026-07-14）
+
+**环境：** `engine/verify_pipeline.py`，librosa 0.11.0，PYIN + 合成测试音频
+
+**症状：** 合成的 C4-C5 大调音阶，检测结果全高一个八度（C5-C6）
+
+**根因链：**
+
+1. **Bug 1（致命）— 采样点计算错误：** `generate_test_audio` 中 `end = int((i + 0.45) * duration_per_note * sr)` 把 0.45 秒多乘了 `duration_per_note`（0.5），导致每个音的时长从 0.45s 被压缩到 0.225s。正弦波在更短时间内跑完相同周期 → 频率正好翻倍 → 每个音精确升高一个八度（纯八度频率比 2:1，基础乐理第6课）。
+
+2. **Bug 2（隐蔽）— NaN 切分法不可靠：** 原代码用「等 PYIN 输出 NaN」（即等声音消失）来切分音符。但真实世界的连奏、混响、弱衰减都会让音符间没有静音。测试音频的 0.05s 间隔只有 2.2 帧，加上衰减包络残留 16.5% 能量，PYIN 无法检测到无声帧。
+
+3. **Bug 1 和 Bug 2 的诡异关系：** Bug 1 把 0.05s 间隔放大到 0.275s（约 12 帧），阴差阳错让 NaN 切分"能工作"。修复 Bug 1 后，Bug 2 暴露——8 个音被合并成 1 个长音。
+
+4. **Bug 3 — 升余弦 ADSR 释放段产生伪起音：** 用 onset detection 替代 NaN 切分后，升余弦包络的释放段被 onset 检测误判为起音（peak 0.3~0.7），将每个音切成两半。真起音的 onset peak 在 2.5 以上，差距约 5-10 倍。
+
+**修复方案：**
+
+| 问题 | 修复 | 位置 |
+|------|------|------|
+| 采样点计算 | `i * duration_per_note * sr` → `(i * duration_per_note + 0.45) * sr` | `generate_test_audio` |
+| 衰减包络 | `exp(-t*4)` → 升余弦 ADSR（0 断点），attack=20ms release=30ms | `generate_test_audio` |
+| NaN 切分 | 改用 `librosa.onset.onset_detect`（频谱通量法）+ PYIN f0 轮廓按起音分段 | `detect_pitches` |
+| 伪起音过滤 | onset_env follow-peak < 1.5 的起音踢掉；音频开头补 t=0 起音补偿 | `detect_pitches` |
+| 同音高合并 | ±1 半音 → 严格相等 `midi == prev['midi']`（E4 和 F4 只差 1 半音） | `detect_pitches` |
+
+**核心教训：**
+
+- **onset 检测比 NaN 切分更符合音乐物理事实** — 每个音都从 Attack 开始（能量/频谱突变），无论前一个音如何结束，起音一定有可检测的峰。等声音消失才切分 = 假设所有演奏都是断奏 + 无混响，真实场景不成立。
+- **合成测试音频要模拟真实演奏** — 包络突变（如线性攻击的导数不连续）会被 onset detection 抓到产生假起音。用升余弦（cos 过渡）保证包络处处可导。
+- **onset_strength 包络本身就是最好的过滤器** — 真起音的峰值是伪起音的 5-10 倍，设一个阈值（1.5）就能完美分离，不需要调 delta/wait 等黑盒参数。
+- **Bug 互相掩盖是危险的信号** — 当你发现"A 修好后 B 坏了"，意味着 A 和 B 本来就都有问题，只是之前恰好互消。
+
+## 今日测试记录（2026-07-14）
+
+### 测试用例
+
+| # | 输入 | 目标 | 结果 |
+|---|------|------|------|
+| 1 | C大调音阶合成音频（0.5s/音） | 验证全链路 | ✅ 8/8 音高全对，C major +0，118 BPM，四分音符 |
+| 2 | G大调快歌合成音频（0.25s/音） | 验证调性+等音+速度区分 | ✅ G major +1，F#5 拼写正确，八分音符 |
+| 3 | 自创旋律(小星星变奏) 5小节 16音 | 真实旋律综合验证 | ✅ 音高全对；⚠️ 节奏漂移 |
+| 4 | C大调 T→S→D→T 和弦进行（`--chords`） | 验证和弦功能分析 | ✅ C(T)→F(S)→G(D)→C(T)，完全正确 |
+| 5 | G→F→C 违规进行 | 验证 D→S 反功能检测 | ✅ 触发 `⚠ D→S 反功能进行（学习前期禁止）` |
+
+### 测试第 3 项详细结果（自创旋律）
+
+**原谱（90 BPM, C大调, 4/4）：**
+```
+第1小节: C4  E4  G4  E4      四个四分音符
+第2小节: C4  E4  G4  C5      四个四分音符
+第3小节: A4  D5  C5  B4      四个四分音符
+第4小节: C5——  E5  D5        C5二分 + 两个四分
+第5小节: C5————              全音符
+```
+
+**Pipeline 输出：**
+
+| 音节 | 音高 | 拍位 | 时值 | 判定 |
+|------|------|------|------|------|
+| 1-12 | C4~D5 | 0-11拍 | 四分=1.0 | ✅ 全部正确 |
+| **第3小节B4** | B4 | **11拍** | **0.75(附点八分)** | ❌ 应1.0拍，漂移0.25 |
+| **第3小节C5** | C5 | **11.75拍** | **0.25(十六分)** | ❌ 不应存在，是B4被切碎后多出的 |
+| **第4小节C5** | C5 | **12拍(准)** | **1.75** | ⚠️ 应为2.0(二分)，被切 |
+| 第4小节E5/D5 | E5 D5 | 13.75/14.75 | 1.0 | ⚠️ 拍位偏移 |
+| **第5小节C5** | C5 | **15.75拍** | **0.25+3.75(被切)** | ❌ 应为4.0(全音符) |
+
+**LilyPond 五线谱输出：**
+- 第1页（第1-3小节）：前2小节完美，第3小节可见 B4 多出的音
+- 第2页（第4-5小节）：第4小节拍位偏移，第5小节全音符被吃 + 大量休止符
+
+**根因定位：**
+1. **BPM 累积漂移**（89 vs 90）→ 第11拍起 B4 漂出量化边界 → 从四分变附点八分
+2. 一个音的偏差像多米诺骨牌把后面所有音推歪
+3. **长音切碎**（二分/全音符内部振幅波动被 onset 误判）
+
+> **2026-07-15 P1 已修复**：改用脉冲网格锚定量化（`_quantize_rhythm` 重写为 IOI 中位数→脉冲→全序列独立锚定）+ 长音碎片合并（`_merge_fragmented_notes`）。修复后自创旋律 16 音全部拍位对齐，music21 输出完整长音，不再有碎片。
+
+### 当前能力边界
+
+```
+✅ 音高识别     ✅ 调性判断(15大+15小) ✅ 调号/拍号
+✅ 等音拼写     ✅ 节奏量化(P1已修)    ✅ 多音检测(P2: Basic Pitch+CoreML)
+✅ 和弦识别     ✅ TSDT功能分析        ✅ 五线谱输出(MusicXML/LilyPond)
+✅ 拍号推断     ✅ 小节线划分          ✅ MIDI 小节嵌入
+✅ 声源分离(P3) — demucs 4轨分离(drums/bass/other/vocals)
+✅ 首调简谱(P6) — 音名→首调唱名+八度点+升降号，按小节|分隔输出
+✅ 音色识别(P4) — 8维频谱特征+模板匹配，9种乐器族分类，各轨独立识别
+🎉 Pipeline 全部计划模块已完成！
+```
+
+### 文件清单
+
+| 文件 | 位置 | 说明 |
+|------|------|------|
+| `verify_pipeline.py` | `engine/` | 主流水线，~2200行（v8，P4 音色识别） |
+| `.venv-p2/` | `engine/` | Python 3.13 虚拟环境（basic-pitch + CoreML + demucs + torch） |
+| `.venv/` | `engine/` | Python 3.14 虚拟环境（旧版，PYIN only） |
+| `自创旋律.mp3` | `~/Desktop/` | 测试音频 |
+| `www.bilibili.com_cookies.txt` | 项目根目录 | B站字幕提取用 |
+
+### 精度评估（2026-07-15，v8 全 Pipeline）
+
+| 维度 | 单旋律 | 和弦/多音 | 说明 |
+|------|--------|----------|------|
+| 音高识别 | 🟢 ~100% | 🟢 ~100% | 最强环节，Basic Pitch CoreML 极稳 |
+| 调性判断 | 🟢 100% | 🟢 100% | KK 相关法 30 调匹配全对 |
+| BPM 检测 | 🟢 ±3 | 🔴 ±70（BPM=50） | 和弦场景 IOI 被同和弦 0 间隔污染 |
+| 节奏量化 | 🟢 拍位全对齐 | 🔴 和弦切碎成十六分 | 上游 BPM 错 → tatum 连锁崩溃 |
+| 拍号推断 | 🟡 3/4(0.81) 6/8(0.77) 4/4(0.67) | — | 4/4 置信度偏低 |
+| 和弦识别 | — | 🟢 类型+转位全对 | pitch class set 匹配正确 |
+| TSDT 功能 | — | 🟢 100% | D→S 违规检测正确 |
+| 简谱输出 | 🟢 100% | 🟢 100% | 首调唱名+八度点+升降号 |
+| 音色识别 | 🟡 合成 100% | 🟡 模板匹配局限 | 真乐器需 MFCC，Voice 区分度最弱 |
+| 声源分离 | — | 🟡 合成音频串音 | demucs 对真乐器更好 |
+
+### 精度优化路线（2026-07-15 制定，待实施）
+
+**🔴 核心修复（阻塞级）：**
+
+| # | 改动 | 根因 | 涉及函数 |
+|---|------|------|---------|
+| 1 | **IOI 去重** | BPM=50：同和弦 38 音共享 onset → diff=0 拉低中位数 | `analyse_music()` L722-727, `_quantize_rhythm()` L839-848 |
+| 2 | **和弦量化同步** | BPM 微小偏差导致同和弦音分散到不同拍位 | `_quantize_rhythm()` 后增加拍位对齐 pass |
+| 3 | **和弦测试音频** | 合成泛音 produce 过度伪起音（sustain 内 amplitude ripple） | `generate_test_audio()` 和弦模式的包络参数 |
+
+**改造思路：**
+- IOI 计算前先对 onset 去重（`set(start_sec)`），同和弦音符只保留一个时间点
+- 量化后遍历和弦分组，取最早 onset 音为 anchor，组内其他音同步 `beat_pos`
+- 和弦测试音频增加 release 衰减速度，减少 sustain 段能量波动
+
+**🟡 精度增强（后续）：**
+
+| # | 改动 | 说明 |
+|---|------|------|
+| 4 | MFCC 13 维集成 | 替换/增强纯频谱模板匹配，提升真乐器音色识别 |
+| 5 | 4/4 置信度提升 | 调权重或加 bass 变化特征 |
+| 6 | `.gitignore` | 已添加，忽略 `*.wav *.mid *.musicxml *.pdf output_*/` |
+
+### v10 调性+拍号修复（2026-07-16）
+
+**调性检测**：扔掉 KK 相关法，改用音阶命中率法。
+
+- 直接数每个候选调的自然大小调音阶包含了多少音符（简单、可解释）
+- 关系大小调（同音阶）：用**和声小调升 VII 级**作为破平局线索（乐理第 161-169 课 + 和声笔记第2课）
+- 同名大小调：大三度 vs 小三度计数
+- 低音阶梯加权：MIDI<48 权重 5x，<60 权重 2.5x
+- 升 VII 级（导音）**不加入**小调音阶打分——太激进会导致 C 大调误判为 a 小调
+
+**拍号推断**：扔掉 librosa beat_track + onset_env，改用音符起音 IOI 中位数自建 beat grid。
+
+- 不再依赖 BPM（rubato 古典钢琴不可靠）
+- 仍不完美：钢琴曲几乎都判 6/8，拍号推断仍是未解决问题
+
+### 真实音频测试集（2026-07-16 建立）
+
+`engine/test_set/` 含 4 首古典钢琴曲（music21 corpus → pretty_midi → fluidsynth WAV），每首有 ground truth JSON（音高/起音/时长），用于每次引擎改动后量化精度变化。
+
+| 曲目 | 调性 | 拍号 | BPM | 音符数 |
+|------|------|------|-----|--------|
+| Bach Prelude BWV 846 | C major | 4/4 | 72 | 601 |
+| Chopin Mazurka Op.6 No.2 | E/C#m (4#) | 3/4 | 189 | 789 |
+| C. Schumann Polonaise Op.1 No.1 | Eb major | 3/4 | 96 | 856 |
+| C. Schumann Polonaise Op.1 No.2 | C major | 3/4 | 92 | 700 |
+
+### v11 Bug 修复（2026-07-16）
+
+三个 Bug，两个修好，一个部分改善。
+
+**✅ Bug 1 — 等音拼写**：`identify_chord` 用 `PC_NAMES`（升号名）取和弦根音名，降号调的 I 级被写成 G# 而非 Ab。
+
+- 新增 `_respell_pc(pc, key_name, mode)`：fifths≥0 用升号名（`PC_NAMES`），<0 用降号名（`_FLAT_PC_NAMES`）
+- `identify_chord` 签名改为 `(pitches, key_name, mode)`，接受调性上下文
+- 验证：Ab major 和弦进行全部显示降号名 `Ab→Bbm→Cm→Db→Eb→Fm→Gdim→Ab`
+- 乐理依据：等音正确拼写取决于调号（基础乐理第1-16课）
+
+**✅ Bug 2 — BPM 倍速（巴赫 72→144）**：`beat_track` 单起点（start_bpm=120）对慢板钢琴锁在八分音符细分上(2x)。
+
+- 多点扫频（60/80/100/120/150/180 起跑），取节拍间隔变异系数（CV）最小者
+- 偏向 tactus 范围（55-130 BPM）加分 0.03 以破平局
+- 极端值安全网：BPM>200 折半，<40 翻倍
+- 验证：巴赫 144→72 ✅，舒曼1/2 不变
+- 乐理依据：拍子（tactus）在 60-120 BPM 是人类的自然拍感区间（基础乐理第49-50课）
+
+**🟡 Bug 3 — 拍号推断**：v10 用 IOI 中位数推节拍周期，密集琶音下 IOI≈0.2s 但拍子在 0.8s。3/4 永远检不出。
+
+- 改用 `beat_period = 60.0 / bpm` 替代 IOI 中位数（拍号描述拍的分组，非音符密度）
+- 动态加权：力度大的音符更可能是强拍音（velocity/255 作为权重）
+- 自相关鉴别 3/4 vs 6/8：lag=3 峰→3/4（圆舞曲 SWW 模式），lag=6 峰→6/8（复合二拍）
+- 验证：3/4 检出率从 0/3 提升到 2/3；巴赫从 6/8 改善为 2/4；舒曼2 仍判 4/4
+- 乐理依据：拍号描述拍的分组方式，非音符密度（基础乐理第49-50课）
+
+### v11 尝试+回滚记录
+
+以下尝试经过测试后回滚，因为引入的回归大于解决的问题：
+
+| 尝试 | 为什么回滚 | 教训 |
+|------|-----------|------|
+| KK 相关法替代命中率法 | 合成音频（fluidsynth）缺少人类演奏的表情张力，KK profile 捕捉不到。巴赫 C→a minor，舒曼2 C→G major | 古典调性模型依赖人类演奏数据。合成音频不具备自然的音级分布偏差 |
+| 节拍能量破 BPM 歧义 | onset energy 对合成音频的泛音结构太敏感，舒曼2 91→185 翻倍 | librosa onset_strength 本身已经是能量包络，在其上再做 mean 无额外分辨力 |
+| 升 VII 级加入小调音阶打分 | 导致 PC 11（天然的 B 音，在 C 大调中是自然 VII 级）误送给 a 小调打分，C→a 误判 | 小调打分必须用纯自然音阶。升 VII 级只能作为**平局后的鉴别线索**，不能参与排序 |
+
+### v11 最终精度
+
+| 曲目 | 调性 | 拍号 | BPM |
+|------|:--:|:--:|:--:|
+| 巴赫前奏曲 | ✅ C | ⚠️ 2/4 (GT:4/4) | ✅ 72 |
+| 肖邦玛祖卡 | ❌ Db (GT:E/C#m) | ✅ **3/4** | ❌ 96 (GT:189) |
+| 舒曼波兰1 | ✅ Eb | ✅ **3/4** | ✅ 96 |
+| 舒曼波兰2 | ✅ C | ⚠️ 4/4 (GT:3/4) | ✅ 92 |
+| 悲怆(真实录音) | ✅ Ab | ⚠️ 4/4 | 🟡 108 |
+
+### 已知局限（诚实评估，暂不修）
+
+**🔴 肖邦调性 E/C#m→Db**：音阶命中率法对半音化程度高的音乐（肖邦使用大量离调音、半音经过音）分辨力不够。KK 相关法在理论上更适合，但合成音频的 PC 分布不具有真钢琴的泛音结构（fluidsynth 的 SoundFont 只有 307KB，音色极度简化），KK profile 匹配在合成音频上反而不如命中率法。
+
+- 等有**真实钢琴录音测试集**后一起解决
+
+**🔴 肖邦 BPM 189→96**：玛祖卡速度极快（标记 189 BPM），所有多点扫频起点都收敛到半速网格（96 = 189/2）。这是 librosa beat_track 的固有局限——onset strength 包络在 >180 BPM 时已无法区分 1x 和 0.5x 拍点位置。
+
+- tactus 偏向（55-130 BPM）的 0.03 加分只是破平局，不是根因。真正的问题是 onset strength 分辨率不够
+
+**🟡 拍号残留**：
+- 巴赫 4/4→2/4：十六分音符流中每两拍才有明显和声变化，自相关 lag=2 天然更强
+- 舒曼2 3/4→4/4：C major 无升降号记号，强弱拍区分度天然低
+
+### 下一步
+
+- 音色识别——关掉不修，App 端隐藏音色输出（模板匹配对合成/真钢琴均无效）
+- 收集 5 首**真实钢琴 WAV** 替代合成测试集后再解决肖邦调性/BPM
+- 查重模块——市面上识谱 App 无此功能
+- 拍号手选——App 加一个拍号选择器，用户可手动切换（比算法更可靠）
+
+---
+
+## MVP App 开发（2026-07-15 启动）
+
+> 参照雅思 App「先把 App 弄出来再迭代」策略 + 连连看「Go 服务器嵌入 .app bundle 自动启动」模式。
+
+### 架构
+
+```
+SwiftUI macOS App (DemoUpgrade.app)
+  └── ServerManager → Process() 自动启动 Go 二进制
+        └── APIClient → HTTP localhost:8090
+              └── Go API Server
+                    └── exec.Command → Python 引擎 (.venv-p2)
+```
+
+### 进度
+
+| 步骤 | 状态 | 说明 |
+|------|------|------|
+| Engine 适配 | ✅ 已完成 | `--output-dir` + `--json` 参数，后向兼容 |
+| Go API 服务器 | ✅ 已完成 | 端口 8090，`GET /api/health` + `POST /api/analyze`，全链路 curl 验证通过 |
+| SwiftUI 客户端 | ✅ 已完成 | 6 文件、零依赖、SPM 项目，拖拽上传+结果展示，App 内自动管理 Go 服务器 |
+| 构建脚本 | ⏳ 待开发 | build_app.sh + macOS-Info.plist，组装 .app bundle |
+
+### Engine 改动（2026-07-15）
+
+`engine/verify_pipeline.py` 新增：
+
+- `--output-dir <path>`：指定输出目录（默认 `engine/` 不变）
+- `--json`：末尾打印 `__JSON_BEGIN__` / `__JSON_END__` 包裹的 JSON 摘要
+- 新增函数：`_build_json_summary()`、`_print_json_summary()`、`_print_separate_json_summary()`
+
+后向兼容：`python3 verify_pipeline.py --chords --ts 3/4` 等原有用法完全不受影响。
+
+### Go API 服务器（2026-07-15）
+
+```
+server/
+├── go.mod                 # module demo-upgrade/server, go 1.26
+├── main.go                # 路由 + 引擎路径查找（ENV→相对路径→硬编码）
+├── demo-upgrade-server    # 编译好的二进制
+├── handlers/
+│   ├── health.go          # GET /api/health → {"status":"ok","engine":"..."}
+│   └── analyze.go         # POST /api/analyze，multipart audio → Python → JSON
+└── middleware/
+    └── log.go             # 请求日志（method + path + status + duration）
+```
+
+**API：**
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/health` | GET | 健康检查 |
+| `/api/analyze` | POST | 上传音频（multipart `audio` 字段），返回分析 JSON |
+
+**关键实现：**
+- 纯标准库 `net/http`，无外部依赖
+- 上传限制 50MB，超时 120s
+- Python 引擎路径查找：`ENGINE_PATH` 环境变量 → 相对 server 二进制 → `~/Desktop/Demo独自升级/engine`
+- 引擎 stdout 中 `__JSON_BEGIN__` / `__JSON_END__` 之间提取 JSON 结果
+
+**编译 & 测试：**
+```bash
+cd ~/Desktop/Demo独自升级/server
+GOPROXY=https://goproxy.cn,direct go build -o demo-upgrade-server .
+
+# 启动测试
+./demo-upgrade-server &
+
+# 健康检查
+curl http://localhost:8090/api/health
+
+# 分析音频
+curl -X POST http://localhost:8090/api/analyze \
+  -F "audio=@../engine/test_c_major.wav"
+# → {"key_name":"C","mode":"major","bpm":120,"time_sig":"4/4",...}
+```
+
+### SwiftUI 客户端（2026-07-16 · 双平台）
+
+```
+client/
+├── Package.swift                              # SPM 项目，macOS 14+ + iOS 16+
+└── Sources/DemoUpgrade/
+    ├── App.swift                              # @main，macOS/iOS 条件编译
+    ├── Network/
+    │   ├── ServerManager.swift                # macOS: Process()启动本地Go二进制
+    │   │                                      # iOS:  远程HTTP连接模式
+    │   └── APIClient.swift                    # multipart上传+健康检查(共用)
+    ├── Models/
+    │   ├── AnalysisResult.swift               # Codable 响应模型
+    │   └── ServerConfig.swift                 # 持久化服务器地址(UserDefaults)
+    └── Views/
+        └── ContentView.swift                  # 拖拽/.fileImporter + 结果卡片
+```
+
+**双平台运行模式：**
+
+| 平台 | 架构 | 服务器地址 |
+|------|------|-----------|
+| macOS | `Process()` 本地拉起 Go 二进制，自动管理生命周期 | `localhost:8090` |
+| iPad | 远程 HTTP 客户端，需手动输入 Mac 局域网 IP 连接 | `192.168.x.x:8090` |
+
+**设计要点：**
+- 参照连连看 `ServerManager` 模式 + 雅思 `#if os(macOS)` 条件编译
+- macOS：App 启动自动 `Process()` 拉 Go 二进制，退出自动 `terminate()`
+- iPad：顶栏输入 Mac IP → 点「连接」→ 健康检查 → 绿色指示灯
+- `.fileImporter`（iOS 14+/macOS 14+）替代 `NSOpenPanel`，双平台通用
+- `.onDrop` 拖拽上传双平台可用
+- `ServerConfig` 用 UserDefaults 持久化上次连接的 Mac IP
+- 零外部依赖，纯 SwiftUI + Foundation
+
+**编译 & 运行：**
+```bash
+# macOS 编译运行
+cd ~/Desktop/Demo独自升级/client && swift build
+open .build/debug/DemoUpgrade   # App 自动启动 Go 服务器
+
+# iPad 部署：需要 Xcode 项目（`swift build` 只能编译当前平台）
+# 创建 Xcode 项目 → 添加 iPad target → 连设备运行
+```
+
+**已验证（2026-07-16）：**
+- ✅ `swift build` 零错误
+- ✅ macOS App 启动 → ServerManager 自动找到并启动 Go 二进制
+- ✅ 全链路：拖拽 test_c_major.wav → C major / 120 BPM / 4/4 / 简谱正确
+- ✅ iPad 编译 + 部署成功（M4 iPad Air, iPadOS 18+）
+- ✅ `gen_xcode_project.py` 双 target (macOS + iOS) 生成成功
+- ✅ `xcrun devicectl device install app` 安装到 iPad 成功
+
+**一键部署命令（iPad）：**
+```bash
+cd ~/Desktop/Demo独自升级/client
+
+# 1. 生成 Xcode 项目（改动源文件后要重新运行）
+python3 gen_xcode_project.py
+
+# 2. 编译（⚠️ derivedData 路径不能含中文，否则 codesign 报 resource fork 错）
+xcodebuild -project DemoUpgrade.xcodeproj \
+  -scheme DemoUpgrade-iOS \
+  -destination 'generic/platform=iOS' \
+  -configuration Debug \
+  -derivedDataPath /tmp/demoupgrade-build \
+  clean build \
+  -allowProvisioningUpdates
+
+# 3. 安装到 iPad
+xcrun devicectl device install app \
+  --device 陈泓州的iPad \
+  /tmp/demoupgrade-build/Build/Products/Debug-iphoneos/DemoUpgrade.app
+```
+
+### 踩坑：中文路径导致 iOS codesign 失败（2026-07-16）
+
+**症状：** `xcodebuild derivedDataPath` 设到项目内（`~/Desktop/Demo独自升级/client/.build-ios`）时，codesign 报：
+```
+resource fork, Finder information, or similar detritus not allowed
+```
+
+**根因：** 项目路径含中文 `Demo独自升级`，macOS 的 `codesign` 在某些情况下处理含中文的路径时，会把路径中的 Unicode 字符误解为 resource fork 标记。
+
+**修复：** derivedData 放到 `/tmp/demoupgrade-build`（纯 ASCII 路径），完美通过。
+
+**教训：** 中文路径虽然大多数场景正常，但在 codesign / 代码签名这种底层工具链中仍可能出问题。如果 Xcode 报 resource fork 错但文件明明干净，先检查路径有没有中文。
+
+### 图标制作（2026-07-16）
+
+使用蒜香图片 (`~/Desktop/蒜香.webp`, 800x800) 生成双平台图标。
+
+| 平台 | 格式 | 文件 | 方式 |
+|------|------|------|------|
+| macOS | `.icns` | `client/AppIcon.icns` | ffmpeg→PNG 1024²→sips 缩放→iconutil 打包，`CFBundleIconFile` 引用 |
+| iOS | 4张 PNG | `client/appicon_{120,152,167,180}.png` | 直接打入 bundle，`iOS-Info.plist` 的 `CFBundleIconFiles` 数组引用 |
+
+**生成流程：** ffmpeg webp→PNG 1024² → sips 缩放到 16/32/64/128/256/512 + @2x → macOS iconutil → iOS 取 120/152/167/180 四张直入 bundle
+
+### 踩坑：iOS Asset Catalog 命令行编译失败（2026-07-16）
+
+**症状：** `xcodebuild` 编译 iOS target 时卡在 `CompileAssetCatalog`，报：
+```
+error: Failed to launch AssetCatalogSimulatorAgent via CoreSimulator spawn
+```
+
+**根因：** `actool`（Asset Catalog 编译器）在命令行构建真机 app 时，尝试启动 CoreSimulator 的 agent 进程来验证图标资源。命令行环境下没有模拟器运行时，spawn 失败。
+
+**修复：** 放弃 `Assets.xcassets`，改用 iOS Info.plist + `CFBundleIconFiles` 数组，直接把图标 PNG 打进 bundle Resources。
+
+**教训：** `GENERATE_INFOPLIST_FILE = YES` + `ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon` 组合依赖 actool 正常工作。命令行构建场景下，Info.plist + 裸 PNG 更可靠。
+
+### 踩坑：iOS 手动 Info.plist 缺少 CFBundleExecutable（2026-07-16）
+
+**症状：** `devicectl device install app` 报 `MissingBundleExecutable`，安装失败。
+
+**根因：** 手动写的 `iOS-Info.plist` 缺少 `<key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>`。Xcode 在 `GENERATE_INFOPLIST_FILE = NO` + `INFOPLIST_FILE = xxx.plist` 时会做变量替换，但前提是 key 必须存在。
+
+**修复：** 在 Plist 中加入 `CFBundleExecutable = $(EXECUTABLE_NAME)`（Xcode 自动替换为 `DemoUpgrade`）。
+
+**教训：** 手动写 Info.plist 最容易被遗忘的两个 key：`CFBundleExecutable`（二进制名）和 `CFBundleIconFiles`（图标）。前者决定能不能装，后者决定有没有图标。
+
+### 踩坑：MP3 文件分析失败 — librosa 不支持 MP3（2026-07-16）
+
+**症状：** iPad 拖入 MP3 后 API 返回 `引擎运行失败: exit status 1`，日志显示 `EOFError`。
+
+**根因链：**
+1. 引擎的 `extract_audio()` 只对**视频**文件做 FFmpeg→WAV 转换
+2. MP3 被当作「音频文件」直接传给 `librosa.load()`
+3. librosa 底层 libsndfile 不支持 MP3 → 层层 fallback → audioread → aifc → chunk → EOFError
+
+**修复：** 新增 `is_wav()` + `ensure_wav()` 函数。`is_wav()` 检查是否为直读格式（`.wav/.flac/.ogg`），其他格式一律 FFmpeg 预转为 WAV。
+
+**教训：** librosa 只原生支持 WAV/FLAC/OGG。任何压缩格式（MP3/M4A/AAC/WMA 等）必须先用 FFmpeg 转码。判断条件应从「是视频吗」改为「不是 WAV 吗」。
+
+### 踩坑：iPad 文件选择器权限 — Security-Scoped Resource（2026-07-16）
+
+**症状：** iPad `.fileImporter` 选文件后分析失败，报 "don't have permission to view it"。
+
+**根因：** iOS/iPadOS 沙盒中，`.fileImporter` 返回的 URL 是安全作用域资源，必须先调用 `url.startAccessingSecurityScopedResource()` 获取临时读权限，否则 `Data(contentsOf:)` 被系统拒绝。
+
+**修复：**
+```swift
+let isSecurityScoped = url.startAccessingSecurityScopedResource()
+// ... 使用文件 ...
+defer { if isSecurityScoped { url.stopAccessingSecurityScopedResource() } }
+```
+
+**教训：** macOS 不需要这个调用（本地拖拽和 `NSOpenPanel` 自动获得权限），但 iOS/iPadOS 是强制沙盒，遗忘就崩。区别在于 `#if os(iOS)` 下 `.fileImporter` 总是 security-scoped。
+
+### 拍号回退 + 音色修复 + 五线谱输出（2026-07-16）
+
+**拍号回退：** 置信度 < 0.5 时自动回退 4/4。复音伴奏的强弱拍对比被快速 decoratives 淹没，`_infer_time_signature` 对 2/4 vs 4/4 分辨力不足。4/4 作为最常见的默认值是最安全的回退。
+
+**音色 Unknown 修复：** JSON 输出 key 名写错。`_run_timbre_analysis` 返回 `primary_instrument`，但 JSON builder 写了 `timbre.get('primary', 'Unknown')`——永远读不到。改为 `timbre.get('primary_instrument', 'Unknown')`。
+
+**五线谱输出：** Go 侧新增 `musicxml_data` 字段（base64 编码的 MusicXML 内容），iPad 侧 `SheetMusicView` 用 WKWebView + OSMD 渲染。双平台适配：macOS 用 `NSViewRepresentable`，iOS 用 `UIViewRepresentable`。
+
+### 五线谱谱号自动选择（2026-07-16）
+
+**乐理依据：**
+- 高音谱号(G谱号)：第二线过 G4，适合小字一组及以上音区
+- 低音谱号(F谱号)：第四线过 F3，适合大字组及以下音区
+- 大谱表(Grand Staff)：钢琴标准双行，以 C4(MIDI 60) 为分界
+
+**算法（O(n)，单次扫描 + `np.median`）：**
+1. 遍历音符收集所有 MIDI pitch，同时标记是否有和弦（multi-pitch at same onset）
+2. min/max/median 用 numpy 原地计算，不排序
+3. 判断逻辑：`span > 24 且 音域跨 C4 两侧 且 有和弦 → 大谱表`，否则 `median >= 55 → 高音谱号`，`else → 低音谱号`
+
+### 踩坑：midi_to_sheet O(n²) 重建导致 200s 曲目超时（2026-07-16）
+
+**症状：** 改完谱号后，《森林小精灵》分析超过 2 分钟无响应。
+
+**根因：** 第一版 `midi_to_sheet` 重建了全部 Score——遍历每个音符时内层再扫全表找同 onset 和弦（`[n for n in sorted_notes if abs(n[0] - off) < 0.01]`）。1834 个音符 → O(n²) → 不计其数的比较。
+
+**修复：** 放弃重建。music21 解析 MIDI 后本身已是大谱表格式（piano Part 自带高低行），只需 `part.insert(0, clef.TrebleClef() / BassClef())` 确保谱号存在。全链路 O(n)，钢琴曲 17 秒完成。
+
+**教训：**
+- 嵌套 `for x in list: for y in list: if cond` 就是性能炸弹，即使每层很快
+- 不要在 O(n) 遍历里 `sorted()`，用 `np.median()` 取中位数才是 O(n)
+- music21 的 `recurse()` 递归遍历 measure 树比 `flat` 重很多
+- 「重建数据」永远比「原位修改」慢，MIDI 解析后的 Score 已经是正确结构
+
+### 🔥 Write 工具覆盖整个文件导致引擎丢失（2026-07-16）
+
+**事故：** 用 Write 工具写 `midi_to_sheet` 函数时，误传了整个文件路径。Write 工具**替换整个文件**，把 2400 行的 `verify_pipeline.py` 覆盖成一个 69 行的函数片段。
+
+**影响：** 引擎全部丢失。无 git、无 Time Machine、无 .pyc 缓存、无 /tmp 残留。
+
+**恢复过程（938 行，API 兼容）：**
+1. 从 CLAUDE.md 里的函数文档、常量表、算法描述还原核心逻辑
+2. 从会话历史中回忆修过的 bug（Basic Pitch 返回 tuple 不是对象、BPM 被和弦 IOI 污染等）
+3. 精简——丢掉调试打印、PDF 导出、冗余分支，保留全功能
+4. 测试：C大调音阶 ✅、钢琴伴奏 ✅、API JSON 输出 ✅
+
+**核心教训：**
+- **Write ≠ Edit**。Write 覆盖整个文件，Edit 精确替换。修改大文件永远用 Edit
+- 没有 git 的项目，先 `git init && git add -A && git commit`，多一层保障
+- 项目文件 > 500 行时，CLAUDE.md 里的函数文档就是你的灾难恢复方案
+- 精简版 938 行比原版 2400 行更稳——删的是调试代码和死逻辑，核心算法反而更清晰
+
+### 五线谱谱号终极方案（2026-07-16 定论）
+
+**问题：** music21 的 `score.write('musicxml')` 内部强制调用 `makeNotation`，**无论你怎么调 API 都会被 makeNotation 重算谱号**。`bestClef=False` 只阻止 makeNotation 自动选谱号，不阻止 write() 时重新 run makeNotation。
+
+**历经方案：**
+1. `part.insert(0, clef.TrebleClef())` — 被 write() 覆盖 ❌
+2. `part.makeNotation(inPlace=True, bestClef=False)` 后再 write — 仍被覆盖 ❌
+3. 拆高音+低音双行 PartStaff — 拆后丢失小节结构，`no measures found` 崩溃 ❌
+4. copy.deepcopy 重建 Measure — 音高/时值/休止符被破坏 ❌
+
+**最终方案：XML 后处理。** 先让 music21 正常 write()，再打开 .musicxml 文件，**字符串搜索替换第一个 `<sign>` 标签**。
+
+```python
+with open(xml_path, 'r') as f: xml = f.read()
+idx = xml.find('<sign>')
+xml = xml[:idx] + f'<sign>{new_sign}</sign>' + xml[end_idx+7:]
+with open(xml_path, 'w') as f: f.write(xml)
+```
+
+8 行代码，不动 music21 内部逻辑，100% 可靠。
+
+### 大谱表暂不实施的决策（2026-07-16）
+
+**背景：** 用户期望钢琴谱显示高音+低音双行大谱表。
+
+**结论：** 当前阶段不做。原因：
+1. 单轨 MIDI 只有一行 Part，要拆成高低双行必须重建 Measure——多次尝试均破坏音高/时值/休止符
+2. 正确的做法是多轨分离后各轨独立输出——这正是 **P3 声源分离**的用途
+3. demucs 分离后 drums/bass/other/vocals 各走独立 Pipeline，自然得到各自的谱号
+
+**路线：** 先把 `--separate` 接到 iPad 上 → 用户上传 → 引擎分离 4 轨 → 每轨独立识谱 + 独立五线谱。
+
+### BPM 被和弦起音污染（2026-07-16）
+
+**症状：** 复音和弦音频（钢琴伴奏 1834 音符），BPM 检测为 342，远超实际的 136。
+
+**根因：** IOI 算法对所有起音间隔取中位数。和弦内多个音同 onset 产生大量接近 0 的间隔，IOI 中位数坍塌 → 推高 BPM。
+
+**修复：** 放弃 IOI 双源融合，单纯依赖 librosa `beat_track`（频谱能量法），BPM > 200 时 clamp 到 120。
+
+**教训：** IOI（起音间隔）对单旋律/人声靠谱，复音和弦场景毫无意义。和弦的垂直结构（多音同时起音）在时间轴上表现为近乎零间隔，炸掉所有统计量。
+
+### v9 引擎重写（2026-07-16）
+
+**背景：** v8 号称「功能无损」，实际 8 个 C 大调音都检出 25 个音（泛音碎片），调性全错（C→c#），和弦识别纯随机（root_pc 计算不通），简谱八度点全错、无节奏记号，音色 100% 误判为 Bass。用户指出问题后全面修复。
+
+**核心 Bug 及修复：**
+
+| Bug | 根因 | 修复 |
+|-----|------|------|
+| **KEY_MAP 小调键名错位** | 字典用小调 tonic_pc 做键但值写的是关系大调名——例如 `(9,'minor'): ('f#',3)` 但 A 小调 tonic_pc=9，应返回 `('a',0)` | 重排整个字典，tonic_pc 对应小调自身主音名 |
+| **Basic Pitch 泛音碎片** | 合成音频的 harmonic 被 CNN 误检为 0.01s 独立音符 | `MIN_DUR = 0.04s` 过滤 + 同 onset 同音级泛音合并 |
+| **identify_chord 完全不通** | `pcs.index((root_offset)%12)` 找不到就 crash；`bass_pc+12*100` 不知所云 | 完全重写：sorted rotation 匹配模板 + 正确 root_pc/转位 |
+| **简谱八度参考错** | 用绝对 C4 做八度基准，而非有效 do | 小调用关系大调首调法：`effective_do_pc = (tonic_pc+3)%12`，以 effective_do 的八度 4 为无点基准 |
+| **简谱无节奏** | 不输出增时线、休止符 | 音值组合法：以拍为单位网格，增时线 `-` 填充长音跨拍，休止符 `0`，4/4 半小节分隔 |
+| **音色硬规则过度** | `centroid<0.15→Bass` 把合成音频全判为 Bass | 去掉 4 条硬规则，纯余弦距离模板匹配 |
+| **NAME_TO_PC 小写键名** | 字典只有大写键名，`'a'` 找不到返回默认 0 | 新增 `_resolve_tonic_pc()`：首字母大写 + 查表 |
+| **八度离群点** | Basic Pitch 偶发检测极低/极高伪影 | `abs(midi - median) > 24` 过滤（2 八度外） |
+| **最后一音时长缺失** | 最后一个音符没有后续起音做 reference，时长被截断 | `analyse_music` 末尾补齐到小节结束 |
+
+**音值组合法实现（乐理依据：基础乐理第 41 课 + 第 49-50 课）：**
+- 以拍为单位建立网格，每拍一个 slot
+- 同拍内多音（和弦）用 `/` 分隔
+- 增时线 `-` 表示长音跨拍延长
+- 休止符 `0` 填充空拍
+- 4/4 在第 2-3 拍间加宽间距（符合音值组合法「半小节为组」原则）
+- 同音级泛音去重渲染
+
+**小调首调法（乐理依据：基础乐理第 161-169 课）：**
+- 小调主音 = la(6)，而非 do(1)
+- 通过关系大调法：`tonic_pc + 3 半音 → 关系大调主音 → 大调偏移表`
+- 例：a 小调 → 关系大调 C → 简谱 `6 7 1̇ 2̇ 3̇ 4̇ 5̇ 6̇`
+
+**验证结果（2026-07-16）：**
+
+| 测试 | 调性 | 简谱 | 和弦 |
+|------|------|------|------|
+| C 大调 | C major ✅ | `1 2 3 4 \| 5 6 7 1̇` ✅ | — |
+| G 大调 | G major ✅ | 同上 ✅ | — |
+| F 大调 | F major ✅ | 同上 ✅ | — |
+| D 大调 | D major ✅ | 同上 ✅ | I-ii-iii-IV-V-vi-vii°-I ✅ |
+| Bb 大调 | Bb major ✅ | 同上 ✅ | — |
+| a 小调 | a minor ✅ | `6 7 1̇ 2̇ \| 3̇ 4̇ 5̇ 6̇` ✅ | — |
+| e 小调 | e minor ✅ | `6̣ 7̣ 1 2 \| 3 4 5 6` ✅ | — |
+| d 小调 | d minor ✅ | 同上 ✅ | — |
+| 自创旋律.mp3 | C major ✅ | 5小节，含二分/全音符 ✅ | — |
+
+**核心教训：**
+
+1. **「功能无损」只能靠实测验证，不能靠代码行数推断。** 938 行精简版在 8 个调性上全部通过，2400 行原版一个都不对。
+2. **KEY_MAP 类的枚举字典必须双重检查对位关系。** 大调和小调的 tonic_pc 含义不同（一个是大调主音，一个是小调主音），字典的值必须与键语义一致。写错一行全盘皆错且难以发现。
+3. **K-K 相关法对小调短片段不稳定是正常现象**——KK 本身对 a minor (PC=9) 相关度 0.866 是对的，问题出在上层 KEY_MAP 键名错位。
+4. **Basic Pitch 的泛音检测是真正价值的体现，但需要后处理过滤。** 多音检测能力让和弦识别成为可能，但合成音频（甚至真实录音）的泛音序列会被误检为同音级重复。`MIN_DUR=0.04s` + 同八度泛音合并是必需的预处理。
+5. **音值组合法不只是「好看」——它是乐谱可读性的基础。** 没有以拍为组、增时线、休止符的简谱，等于没有标点符号的句子。
+6. **小调首调法的 do 不是主音。** 关系大调首调法（tonic=la=6）是国际通用的首调唱名法，直接把小调主音当 do 唱是严重错误。
+
+### v9 已知问题与局限（2026-07-16 诚实评估）
+
+> 引擎从「完全不可用」修到了「在 8 音合成音阶上能出正确结果」，但距离实际产品仍有巨大差距。以下问题需正视：
+
+**🔴 当前不可用/严重不足：**
+
+| 问题 | 现状 | 影响 |
+|------|------|------|
+| 音色识别 | 模板匹配对合成音频基本无效（Bass/Synth 主导），真乐器需 MFCC | 输出「Bass 73%」用户会觉得在胡说 |
+| 和弦识别 | 只在自然音阶合成音频上验证过，未跑过真实录音 | 真实钢琴的泛音叠加会让 pitch class set 完全乱掉 |
+| 拍号推断 | 置信度始终 < 0.5，永远回退 4/4 | 3/4 圆舞曲也判成 4/4 |
+| 五线谱质量 | 从未目视验证（只确认 MusicXML 写入成功） | 不知道谱面长什么样 |
+| Basic Pitch 泛音 | 8 音检出 9 个（仍残留 1 个），泛音过滤不彻底 | 持续污染下游 |
+| 测试覆盖面 | 只测了 8 音合成音阶 × 8 个调性 + 1 首自创旋律 | 真实 MP3、多乐器、长曲目从未验证 |
+
+**🟡 功能残缺：**
+
+| 缺席的功能 | 说明 |
+|-----------|------|
+| 简谱节奏记号 | 无下划线（八分/十六分）、无附点、无连音线——只能标音高和四分/二分/全音符 |
+| 声源分离（P3）| 引擎侧已完成，但没接入 iPad App |
+| 和声/旋律小调 | 升 VI/VII 级的非自然音仍被标记为调外半音（#6 #7） |
+| 复拍号 | 5/4、7/8 等完全不支持 |
+| 真实录音验证 | 零——全部测试用合成音频 |
+
+**🟢 确实可用的部分：**
+
+- 8 个常见调性（C/G/F/D/Bb 大调 + a/e/d 小调）检测正确
+- 简谱音高 + 八度点 + 音值组合法基本框架正确
+- 自然音和弦进行（D: I-ii-iii-IV-V-vi-vii°-I）正确
+- API 全链路（Go→Python→JSON）正常
+
+**下一步优先级（2026-07-16 制定）：**
+
+1. 找一首真实钢琴曲的 MIDI/WAV 跑一遍，看实际输出什么
+2. 目视检查五线谱 MusicXML（用 MuseScore 打开 output.musicxml）
+3. 决定音色识别是否继续投入——真乐器和合成音频的频谱特征差距太大，模板匹配这条路可能走不通
+4. 和弦从 pitch class set 匹配升级为考虑 voicing（开放/密集排列影响消歧）
+
