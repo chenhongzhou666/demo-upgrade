@@ -345,37 +345,70 @@ def analyse_music(notes: list[dict], audio: np.ndarray, sr: int) -> dict:
 
     onset_env = librosa.onset.onset_strength(y=audio, sr=sr)
 
-    # BPM 检测 v10a: 多点起跑 + 稳定性择优
-    # 乐理依据: 拍子(tactus)通常在 60-120 BPM。慢速曲(Adagio 66-76) beat_track
-    # 常锁在八分音符细分上(2x真BPM)，快速曲常锁在半拍或小节级(0.5x真BPM)。
-    # 多起点扫频，取节拍间隔最稳定者。
+    # BPM 检测 v12: 去重起音 IOI + tactus 折半 + librosa 多点起跑择优
+    # 乐理依据: 拍子(tactus) 55-140 BPM (基础乐理第49-50课)。
+    # 核心洞察: 去重复音起音(onset detect, delta=0.3)的IOI中位数直接给出
+    # 主导节奏单元。单旋律/人声/和弦进行的主导节奏单元=拍子。
+    # 只有在极密集音符(如巴赫十六分音符流)时IOI才缩到细分单元，
+    # 此时折半(tactus范围)即可恢复真BPM。
     hop_length = 512
-    best_bpm = 120.0
-    best_cv = 999.0
-    for start_bpm in [60, 80, 100, 120, 150, 180]:
-        tempo, beats = librosa.beat.beat_track(
-            onset_envelope=onset_env, sr=sr,
-            start_bpm=start_bpm, tightness=100, hop_length=hop_length)
-        bpm_cand = float(np.asarray(tempo).item())
-        if bpm_cand < 35 or bpm_cand > 215:
-            continue
-        if len(beats) >= 4:
+
+    # 1. 去重起音检测 + IOI 中位数
+    onset_frames = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, hop_length=hop_length, delta=0.3)
+    onset_times = librosa.frames_to_time(onset_frames, sr=sr, hop_length=hop_length)
+    if len(onset_times) >= 3:
+        iois = np.diff(onset_times)
+        iois = iois[(iois > 0.08) & (iois < 2.5)]
+        ioi_median = float(np.median(iois)) if len(iois) >= 2 else 0.0
+        bpm_ioi = 60.0 / ioi_median if ioi_median > 0 else 0.0
+    else:
+        ioi_median = 0.0
+        bpm_ioi = 0.0
+
+    # 2. tactus 折半
+    if 55 <= bpm_ioi <= 140:
+        bpm = bpm_ioi
+    elif bpm_ioi > 140 and 55 <= bpm_ioi / 2 <= 130:
+        bpm = bpm_ioi / 2
+    elif bpm_ioi > 140 and 55 <= bpm_ioi / 3 <= 130:
+        bpm = bpm_ioi / 3
+    elif 0 < bpm_ioi < 55 and 55 <= bpm_ioi * 2 <= 140:
+        bpm = bpm_ioi * 2
+    else:
+        bpm = 0.0  # 不可靠，回退 librosa
+
+    # 3. librosa 多点择优 (仅 IOI 不可靠时回退)
+    if bpm == 0.0 or bpm > 180 or bpm < 35:
+        best_lib_bpm = 120.0
+        best_lib_score = -999.0
+        for start_bpm in [40, 60, 80, 100, 120]:
+            tempo, beats = librosa.beat.beat_track(
+                onset_envelope=onset_env, sr=sr,
+                start_bpm=start_bpm, tightness=100, hop_length=hop_length)
+            bpm_raw = float(np.asarray(tempo).item())
+            if bpm_raw < 35 or bpm_raw > 215 or len(beats) < 4:
+                continue
             beat_t = librosa.frames_to_time(beats, sr=sr, hop_length=hop_length)
             ibis = np.diff(beat_t)
             if len(ibis) < 2:
                 continue
             cv = float(np.std(ibis) / (np.mean(ibis) + 1e-10))
-            # 偏向 tactus 范围 (55-130 BPM)
-            tactus_bonus = 0.03 if 55 <= bpm_cand <= 130 else 0.0
-            score = cv - tactus_bonus
-            if score < best_cv:
-                best_cv = score
-                best_bpm = bpm_cand
-    bpm = best_bpm
-    # 极端值安全网: 仍可能选到偏门值, clamp 一次
+            # 在 0.5x/1x/2x 中选 tactus 内 CV 最佳者
+            for mult in [0.5, 1.0, 2.0]:
+                test_bpm = bpm_raw * mult
+                if not (40 <= test_bpm <= 180):
+                    continue
+                tactus_w = 1.0 if 55 <= test_bpm <= 140 else 0.6
+                score = -cv * tactus_w
+                if score > best_lib_score:
+                    best_lib_score = score
+                    best_lib_bpm = test_bpm
+        bpm = best_lib_bpm
+
+    # 安全网
     if bpm > 200:
         bpm /= 2 if bpm / 2 >= 40 else 120
-    elif bpm < 40:
+    elif bpm < 35:
         bpm *= 2 if bpm * 2 <= 200 else 120
     print(f"      [速度] 检测 BPM = {bpm:.0f}")
 
