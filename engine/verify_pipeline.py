@@ -496,41 +496,38 @@ def _detect_key_krumhansl_kessler(midi_notes: list[int]) -> tuple[str, str, int]
     return name, best_mode, fifths
 
 def _quantize_rhythm(notes: list[dict], bpm: float, beat_times: np.ndarray | None = None) -> tuple[list[dict], float, float, float]:
+    """v12 BPM网格锚定。不再用IOI中位数推导tatum——复音音乐(Basic Pitch
+    多音检测+真实钢琴)产生大量接近零的起音间隔，IOI中位数坍塌导致
+    小节数疯狂膨胀(贝多芬73小节→316小节)。
+
+    乐理依据：拍号描述拍的分组方式(基础乐理第49-50课)，量化网格
+    应从BPM推导而非音符密度推导。16分音符(每拍4份)是通用分辨率。
+    """
+    beat_dur = 60.0 / bpm
     origin_sec = notes[0]['start_sec']
-    if len(notes) >= 3:
-        iois = np.diff([n['start_sec'] for n in notes])
-        valid = iois[(iois > 0.03) & (iois < 2.0)]
-        tatum_sec = float(np.median(valid)) if len(valid) >= 2 else 60.0 / bpm / 4
-        tatum_sec = max(tatum_sec, 0.05)
-    else:
-        tatum_sec = 60.0 / bpm / 4
 
-    snapped = [round((n['start_sec'] - origin_sec) / tatum_sec) for n in notes]
-    ioi_tatums = np.diff(snapped)
-    ioi_tatums = ioi_tatums[ioi_tatums > 0]
-    if len(ioi_tatums) > 0:
-        from collections import Counter
-        cnt = Counter(ioi_tatums)
-        tatums_per_beat = cnt.most_common(1)[0][0]
-    else:
-        tatums_per_beat = max(1, round(60.0 / bpm / tatum_sec))
-
-    eff_bpm = 60.0 / (tatum_sec * tatums_per_beat)
-    beat_dur = 60.0 / eff_bpm
+    # 16分音符：一拍分4份，tatum_sec = 16分音符时长
+    tatums_per_beat = 4
+    tatum_sec = beat_dur / tatums_per_beat
 
     quantized = []
     for i, n in enumerate(notes):
         q = dict(n)
-        q['beat_pos'] = snapped[i] / tatums_per_beat
+        offset = n['start_sec'] - origin_sec
+        snapped = round(offset / tatum_sec)
+        q['beat_pos'] = snapped / tatums_per_beat
+
         if i < len(notes) - 1:
-            dur_tatums = snapped[i+1] - snapped[i]
+            next_offset = notes[i + 1]['start_sec'] - origin_sec
+            next_snapped = round(next_offset / tatum_sec)
+            dur_tatums = max(1, next_snapped - snapped)
         else:
             dur_tatums = tatums_per_beat
-        dur_tatums = max(1, dur_tatums)
         q['duration_beats'] = dur_tatums / tatums_per_beat
         q['duration_sec'] = q['duration_beats'] * beat_dur
         quantized.append(q)
-    return quantized, eff_bpm, tatum_sec, tatums_per_beat
+
+    return quantized, bpm, tatum_sec, tatums_per_beat
 
 def _merge_fragmented_notes(notes: list[dict], bpm: float) -> list[dict]:
     eighth = (60.0 / bpm) / 2
@@ -965,6 +962,9 @@ def notes_to_midi(analysis: dict, output_path: str):
     pm = pretty_midi.PrettyMIDI(initial_tempo=bpm)
     num, den = analysis['time_sig'].split('/')
     pm.time_signature_changes.append(pretty_midi.TimeSignature(int(num), int(den), 0.0))
+    # 嵌入调号到 MIDI（music21 解析时需要）
+    ks_name = analysis['key_name'] if analysis['mode'] == 'major' else analysis['key_name'].lower()
+    pm.key_signature_changes.append(pretty_midi.KeySignature(pretty_midi.key_name_to_key_number(ks_name), 0.0))
     piano = pretty_midi.Instrument(program=0, name='Piano')
     beat_dur = 60.0 / bpm
     for note in notes:
@@ -980,6 +980,79 @@ def notes_to_midi(analysis: dict, output_path: str):
 # ══════════════════════════════════════════════════════════════════
 # Step 5: 五线谱生成
 # ══════════════════════════════════════════════════════════════════
+
+def _respell_score_notes(score, key_name: str, mode: str):
+    """根据调号重拼五线谱中所有音符的等音（MIDI 只有 pitch number，默认升号拼写）。
+    乐理依据：等音正确拼写取决于调号上下文（基础乐理第1-16课）。"""
+    from music21 import pitch as m21pitch
+
+    # 构建每个 pitch class 在目标调中的首选拼写
+    # 大调音阶半音偏移 [0,2,4,5,7,9,11]，小调用关系大调
+    if mode == 'minor':
+        effective_tonic = (NAME_TO_PC.get(key_name.capitalize(), 0) + 3) % 12
+    else:
+        effective_tonic = NAME_TO_PC.get(key_name, 0)
+
+    # 大调音阶的 pitch class 集合
+    major_offsets = [0, 2, 4, 5, 7, 9, 11]
+    scale_pcs = set((effective_tonic + o) % 12 for o in major_offsets)
+
+    # 为 scale 中的每个 pc 分配标准音名
+    letter_pool = ['C', 'D', 'E', 'F', 'G', 'A', 'B']
+    # 从主音出发，按大调音阶分配字母（每个字母只用一次）
+    tonic_idx = letter_pool.index(_respell_pc(effective_tonic, key_name, mode)[0])
+
+    preferred = {}  # pc -> (step, alter)
+    for i, offset in enumerate(major_offsets):
+        pc = (effective_tonic + offset) % 12
+        letter = letter_pool[(tonic_idx + i) % 7]
+        # 这个字母的声音在 12-TET 中对应的默认 PC
+        default_pc = NAME_TO_PC.get(letter, 0)
+        alter = pc - default_pc
+        # 标准化 alter 到 [-2, 2]
+        if alter > 6:
+            alter -= 12
+        elif alter < -6:
+            alter += 12
+        if alter not in (-1, 0, 1, 2, -2):
+            alter = alter % 12
+            if alter > 6:
+                alter -= 12
+        preferred[pc] = (letter, alter)
+
+    # 遍历所有音符，必要时重拼
+    for el in score.recurse().notes:
+        if el.isChord:
+            for p in el.pitches:
+                pc = p.midi % 12
+                if pc in preferred:
+                    target_step, target_alter = preferred[pc]
+                    cur_alter = p.accidental.alter if p.accidental else 0
+                    if p.step != target_step or cur_alter != target_alter:
+                        # 找到等效的拼写
+                        target = m21pitch.Pitch(target_step + ('#' if target_alter > 0 else '-' if target_alter < 0 else ''))
+                        if target.ps != p.ps:
+                            target = target.getEnharmonic()
+                        if abs(target.ps - p.ps) < 0.01:
+                            p.step = target.step
+                            p.accidental = target.accidental
+        elif el.isNote and el.pitch:
+            p = el.pitch
+            pc = p.midi % 12
+            if pc in preferred:
+                target_step, target_alter = preferred[pc]
+                # 构建目标 pitch name
+                alter_str = '#' * target_alter if target_alter > 0 else '-' * abs(target_alter) if target_alter < 0 else ''
+                target_name = target_step + alter_str
+                try:
+                    target = m21pitch.Pitch(target_name)
+                except Exception:
+                    continue
+                cur_alter = p.accidental.alter if p.accidental else 0
+                if abs(target.ps - p.ps) < 0.01 and (p.step != target_step or cur_alter != target_alter):
+                    p.step = target.step
+                    p.accidental = target.accidental
+
 
 def midi_to_sheet(midi_path: str, output_dir: str, analysis: dict):
     from music21 import converter, metadata, key, meter, clef
@@ -1012,6 +1085,9 @@ def midi_to_sheet(midi_path: str, output_dir: str, analysis: dict):
     for part in score.parts:
         part.insert(0, clef.TrebleClef() if use_treble else clef.BassClef())
 
+    # MIDI 只存 pitch number，music21 默认用升号拼写。根据调号重拼所有音符
+    _respell_score_notes(score, key_name, mode)
+
     score.metadata = metadata.Metadata()
     score.metadata.title = f"识谱 — {key_name} {mode}调  {bpm:.0f} BPM"
     score.metadata.composer = "Demo 独自升级"
@@ -1019,14 +1095,17 @@ def midi_to_sheet(midi_path: str, output_dir: str, analysis: dict):
     xml_path = os.path.join(output_dir, "output.musicxml")
     score.write('musicxml', fp=xml_path)
 
-    # XML 后处理: 字符串替换第一个 <sign>
+    # XML 后处理: 字符串替换谱号
     new_sign = "G" if use_treble else "F"
     with open(xml_path, 'r') as f:
         xml = f.read()
+
+    # 修复谱号 (music21 write() 强制调用 makeNotation 覆盖手动插入的谱号)
     idx = xml.find('<sign>')
     if idx > 0:
         end_idx = xml.find('</sign>', idx)
         xml = xml[:idx] + f'<sign>{new_sign}</sign>' + xml[end_idx+7:]
+
     with open(xml_path, 'w') as f:
         f.write(xml)
 
