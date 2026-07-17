@@ -2,6 +2,8 @@
 *.mid
 *.musicxml
 *.pdf
+*.sf2
+*.sf3
 __pycache__/
 output_*/
 !test_set/*.wav
