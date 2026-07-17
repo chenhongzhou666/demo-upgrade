@@ -5,12 +5,15 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Generated audio/output files (keep test_set WAVs)
+# Generated audio/output files (keep test_set WAVs/MIDI)
 engine/*.wav
 engine/*.mid
 engine/*.musicxml
 engine/*.pdf
 engine/output_*/
+engine/*.sf2          # SoundFont (142MB, downloaded separately)
+engine/*.sf3
+engine/test_set/*.old # pre-render backups
 
 # System
 .DS_Store
