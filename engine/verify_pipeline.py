@@ -315,8 +315,45 @@ def detect_pitches_basic_pitch(audio_path: str) -> tuple[list[dict], np.ndarray,
                 j += 1
         i += 1
 
+    # 同 onset 簇取最低音：泛音列中基音频率最低，同一 onset 簇保留最低 MIDI
+    # 窗口 0.025s——同一琴键的泛音检测 onset 差异 < 10ms，而快速琶音和弦
+    # 相邻音间隔 > 30ms（基础乐理：钢琴触键到发声 ~5ms，泛音列同时激发）
+    i = 0
+    cleaned = []
+    cluster_dropped = 0
+    CLUSTER_WINDOW = 0.025
+    while i < len(notes):
+        cluster = [notes[i]]
+        j = i + 1
+        while j < len(notes) and notes[j]['start_sec'] - notes[i]['start_sec'] < CLUSTER_WINDOW:
+            cluster.append(notes[j])
+            j += 1
+        lowest = min(cluster, key=lambda n: n['midi'])
+        cleaned.append(lowest)
+        cluster_dropped += len(cluster) - 1
+        i = j
+    notes = cleaned
+
+    # Basic Pitch 在低质量/合成音频上可能整体偏一个八度（泛音列基音 vs 谐波混淆）
+    # 中位 ≤ 54 且无大量高音 → 整体偏低（正常钢琴/人声中位 55-72）
+    if len(notes) > 3:
+        midis = [n['midi'] for n in notes]
+        median_midi = float(np.median(midis))
+        octave_shift = 0
+        if median_midi <= 42:
+            octave_shift = 24
+        elif median_midi <= 54:
+            octave_shift = 12
+        if octave_shift:
+            for n in notes:
+                n['midi'] += octave_shift
+            print(f"      ⚠️  八度修正: +{octave_shift} 半音 (中位 {median_midi:.0f} → {median_midi+octave_shift:.0f})")
+
     print(f"      多音检测: {len(notes)} 个音符" +
-          (f"  (过滤 {filtered} 泛音碎片" + (f", 合并 {merged} 泛音重复" if merged else "") + ")" if (filtered or merged) else ""))
+          (f"  (过滤 {filtered} 泛音碎片" +
+           (f", 合并 {merged} 同音" if merged else "") +
+           (f", 去除 {cluster_dropped} 泛音列" if cluster_dropped else "") +
+           ")" if (filtered or merged or cluster_dropped) else ""))
 
     # 过滤八度离群点: 远离中位音高 2 个八度以上的音符大概率是 Basic Pitch 虚假检测
     if len(notes) > 3:
@@ -1259,7 +1296,7 @@ def _run_pipeline_stem(audio_path: str, label: str, output_dir: str, use_pyin: b
     return analysis
 
 
-def _build_json_summary(analysis: dict, output_dir: str = '') -> dict:
+def _build_json_summary(analysis: dict, output_dir: str = '', include_notes: bool = False) -> dict:
     chords_json = []
     for c in analysis.get('chords', []):
         chords_json.append({
@@ -1283,6 +1320,13 @@ def _build_json_summary(analysis: dict, output_dir: str = '') -> dict:
             'primary': timbre_data.get('primary_instrument', 'Unknown'),
             'distribution': timbre_data.get('instrument_counts', {}),
         },
+        **({
+            'detected_notes': [
+                {'midi': n['midi'], 'start_sec': n['start_sec'],
+                 'duration_sec': n.get('duration_sec', 0)}
+                for n in analysis.get('notes', [])
+            ]
+        } if include_notes else {}),
         'files': {
             'midi': os.path.join(output_dir, "output.mid") if output_dir else '',
             'musicxml': os.path.join(output_dir, "output.musicxml") if output_dir else '',
@@ -1290,8 +1334,8 @@ def _build_json_summary(analysis: dict, output_dir: str = '') -> dict:
     }
 
 
-def _print_json_summary(analysis: dict, output_dir: str = ''):
-    summary = _build_json_summary(analysis, output_dir)
+def _print_json_summary(analysis: dict, output_dir: str = '', include_notes: bool = False):
+    summary = _build_json_summary(analysis, output_dir, include_notes)
     print("\n__JSON_BEGIN__")
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     print("__JSON_END__")
@@ -1339,6 +1383,7 @@ def main():
     parser.add_argument('--output-dir', default=os.path.dirname(os.path.abspath(__file__)),
                         help='输出目录')
     parser.add_argument('--json', action='store_true', help='输出 JSON 摘要')
+    parser.add_argument('--eval-notes', action='store_true', help='JSON 中包含检测到的音符（用于评估）')
     parser.add_argument('--keep', action='store_true', help='保留生成的测试文件')
     parser.add_argument('--test-key', default='C', help='测试调性: C, G, F, D, Bb, a, e, d 等 (默认 C)')
     args = parser.parse_args()
@@ -1406,7 +1451,7 @@ def main():
                 print(analysis['jianpu_text'])
 
             if args.json:
-                _print_json_summary(analysis, output_dir)
+                _print_json_summary(analysis, output_dir, include_notes=args.eval_notes)
 
     # 清理
     _cleanup_generated_files(output_dir, args.keep, was_auto_test)
