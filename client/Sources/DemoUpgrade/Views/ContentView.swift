@@ -4,17 +4,33 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @EnvironmentObject var server: ServerManager
 
+    // 模式切换
+    @State private var mode: AppMode = .analyze
+
+    // 识谱状态
     @State private var analysisState: AnalysisState = .idle
     @State private var result: AnalysisResult?
     @State private var errorMessage: String?
     @State private var isDropTargeted = false
     @State private var showFileImporter = false
     @State private var showSheetMusic = false
+    @State private var lastAudioURL: URL?
+    @State private var selectedTimeSig: String = "4/4"
+
+    // 查重状态
+    @State private var searchState: SearchState = .idle
+    @State private var searchResult: SearchResponse?
+    @State private var searchErrorMessage: String?
 
     #if os(iOS)
     @State private var serverHost: String = ServerConfig.host
     @State private var isConnecting = false
     #endif
+
+    enum AppMode: String, CaseIterable {
+        case analyze = "识谱"
+        case search = "查重"
+    }
 
     enum AnalysisState {
         case idle
@@ -24,9 +40,27 @@ struct ContentView: View {
         case error
     }
 
+    enum SearchState {
+        case idle
+        case searching
+        case done
+        case error
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             titleBar
+
+            // 模式切换
+            Picker("模式", selection: $mode) {
+                ForEach(AppMode.allCases, id: \.self) { m in
+                    Text(m.rawValue).tag(m)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 80)
+            .padding(.vertical, 10)
+            .onChange(of: mode) { _, _ in resetAll() }
 
             Divider()
                 .padding(.horizontal, 24)
@@ -39,15 +73,11 @@ struct ContentView: View {
 
             Spacer(minLength: 16)
 
-            switch analysisState {
-            case .idle:
-                dropZoneView
-            case .uploading, .analyzing:
-                analyzingView
-            case .done:
-                resultView
-            case .error:
-                errorView
+            // 内容区（按模式切换）
+            if mode == .analyze {
+                analyzeContent
+            } else {
+                searchContent
             }
 
             Spacer(minLength: 16)
@@ -68,11 +98,52 @@ struct ContentView: View {
         .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.audio, .audiovisualContent, .mpeg4Movie, .mp3, .wav]) { result in
             switch result {
             case .success(let url):
-                startAnalysis(url: url)
+                if mode == .analyze {
+                    startAnalysis(url: url)
+                } else {
+                    startSearch(url: url)
+                }
             case .failure(let error):
-                errorMessage = error.localizedDescription
-                analysisState = .error
+                if mode == .analyze {
+                    errorMessage = error.localizedDescription
+                    analysisState = .error
+                } else {
+                    searchErrorMessage = error.localizedDescription
+                    searchState = .error
+                }
             }
+        }
+    }
+
+    // MARK: - Analyze Content
+
+    @ViewBuilder
+    private var analyzeContent: some View {
+        switch analysisState {
+        case .idle:
+            dropZoneView
+        case .uploading, .analyzing:
+            analyzingView
+        case .done:
+            resultView
+        case .error:
+            errorView
+        }
+    }
+
+    // MARK: - Search Content
+
+    @ViewBuilder
+    private var searchContent: some View {
+        switch searchState {
+        case .idle:
+            searchDropZone
+        case .searching:
+            searchingView
+        case .done:
+            searchResultView
+        case .error:
+            searchErrorView
         }
     }
 
@@ -265,7 +336,30 @@ struct ContentView: View {
             ], spacing: 12) {
                 infoTag("调性", r.keyDisplay, .blue)
                 infoTag("速度", r.bpmDisplay, .orange)
-                infoTag("拍号", r.timeSig, .green)
+
+                // 拍号（可手动切换）
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("拍号")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Picker("拍号", selection: $selectedTimeSig) {
+                        Text("2/4").tag("2/4")
+                        Text("3/4").tag("3/4")
+                        Text("4/4").tag("4/4")
+                        Text("6/8").tag("6/8")
+                    }
+                    .pickerStyle(.menu)
+                    .onChange(of: selectedTimeSig) { _, newTS in
+                        if newTS != r.timeSig, let url = lastAudioURL {
+                            reanalyzeWithTS(url: url, timeSig: newTS)
+                        }
+                    }
+                    .onAppear {
+                        selectedTimeSig = r.timeSig
+                    }
+                    .disabled(analysisState == .uploading || analysisState == .analyzing)
+                }
+
                 infoTag("乐器", r.timbre.primary, .purple)
             }
         }
@@ -487,6 +581,239 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Search Views
+
+    private var searchDropZone: some View {
+        VStack(spacing: 20) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 20)
+                    .strokeBorder(
+                        isDropTargeted ? Color.accentColor : Color.secondary.opacity(0.3),
+                        style: StrokeStyle(lineWidth: isDropTargeted ? 3 : 2, dash: [8, 4])
+                    )
+                    .background(
+                        RoundedRectangle(cornerRadius: 20)
+                            .fill(isDropTargeted ? Color.accentColor.opacity(0.08) : Color.clear)
+                    )
+
+                VStack(spacing: 16) {
+                    Image(systemName: "magnifyingglass.circle")
+                        .font(.system(size: 48))
+                        .foregroundStyle(isDropTargeted ? .blue : .secondary)
+
+                    Text(isDropTargeted ? "松开以搜索" : "拖拽音频查重")
+                        .font(.title3)
+                        .foregroundStyle(isDropTargeted ? .blue : .secondary)
+
+                    Text("或")
+                        .font(.caption)
+                        .foregroundStyle(.secondary.opacity(0.5))
+
+                    Button(action: { showFileImporter = true }) {
+                        Label("选择文件...", systemImage: "doc.badge.plus")
+                            .frame(width: 140)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+
+                    Text("比对曲库中的旋律相似度")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(40)
+            }
+            .frame(maxWidth: 480, minHeight: 260)
+        }
+        .padding(.horizontal, 40)
+    }
+
+    private var searchingView: some View {
+        VStack(spacing: 24) {
+            ProgressView()
+                .scaleEffect(1.5)
+                .padding(.bottom, 8)
+
+            Text("正在提取旋律指纹...")
+                .font(.headline)
+
+            Text("搜索曲库中的相似旋律")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(60)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(.ultraThinMaterial)
+        )
+    }
+
+    private var searchResultView: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                if let sr = searchResult {
+                    // 查询信息卡片
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("旋律搜索", systemImage: "magnifyingglass")
+                            .font(.headline)
+
+                        HStack(spacing: 16) {
+                            VStack(alignment: .leading) {
+                                Text("检测音符")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Text("\(sr.query.totalNotes)")
+                                    .font(.title3.weight(.bold))
+                            }
+                            VStack(alignment: .leading) {
+                                Text("指纹哈希")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Text("\(sr.query.hashCount)")
+                                    .font(.title3.weight(.bold))
+                            }
+                            VStack(alignment: .leading) {
+                                Text("曲库规模")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Text("\(sr.librarySize) 首")
+                                    .font(.title3.weight(.bold))
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(.ultraThinMaterial)
+                    )
+
+                    if sr.results.isEmpty {
+                        VStack(spacing: 12) {
+                            Image(systemName: "questionmark.circle")
+                                .font(.largeTitle)
+                                .foregroundStyle(.secondary)
+                            Text("未找到相似旋律")
+                                .font(.headline)
+                            Text("该旋律在曲库中没有匹配")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(40)
+                        .background(
+                            RoundedRectangle(cornerRadius: 14)
+                                .fill(.ultraThinMaterial)
+                        )
+                    } else {
+                        // 搜索结果列表
+                        ForEach(sr.results) { item in
+                            searchResultRow(item)
+                        }
+                    }
+                }
+
+                Button(action: { searchState = .idle; searchResult = nil }) {
+                    Label("再搜一首", systemImage: "arrow.counterclockwise")
+                        .frame(width: 160)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .padding(.top, 8)
+                .padding(.bottom, 24)
+            }
+            .padding(.horizontal, 40)
+        }
+    }
+
+    private func searchResultRow(_ item: SearchResultItem) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.track.title)
+                        .font(.headline)
+                    Text("\(item.track.composer) · \(item.track.keyName)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("\(item.similarityPercent)%")
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(similarityColor(item.similarityPercent))
+            }
+
+            // 相似度条
+            VStack(alignment: .leading, spacing: 4) {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(.secondary.opacity(0.2))
+                            .frame(height: 8)
+
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(similarityColor(item.similarityPercent))
+                            .frame(width: geo.size.width * CGFloat(item.similarityPercent) / 100, height: 8)
+                    }
+                }
+                .frame(height: 8)
+
+                HStack {
+                    Text("覆盖率 \(Int(item.containment * 100))%")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("Jaccard \(Int(item.jaccard * 100))%")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("匹配 \(item.matchCount) 哈希")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(.ultraThinMaterial)
+        )
+    }
+
+    private func similarityColor(_ pct: Int) -> Color {
+        switch pct {
+        case 50...: return .green
+        case 30..<50: return .orange
+        default: return .secondary
+        }
+    }
+
+    private var searchErrorView: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(.orange)
+
+            Text("搜索失败")
+                .font(.headline)
+
+            if let msg = searchErrorMessage {
+                Text(msg)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 40)
+            }
+
+            Button(action: { searchState = .idle }) {
+                Label("重试", systemImage: "arrow.counterclockwise")
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(60)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(.ultraThinMaterial)
+        )
+    }
+
     // MARK: - Actions
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
@@ -498,14 +825,22 @@ struct ContentView: View {
                 provider.loadItem(forTypeIdentifier: type.identifier, options: nil) { item, _ in
                     if let url = item as? URL {
                         DispatchQueue.main.async {
-                            startAnalysis(url: url)
+                            if mode == .analyze {
+                                startAnalysis(url: url)
+                            } else {
+                                startSearch(url: url)
+                            }
                         }
                     } else if let data = item as? Data {
                         let tmpDir = FileManager.default.temporaryDirectory
                         let tmpFile = tmpDir.appendingPathComponent("dropped-\(UUID().uuidString).wav")
                         try? data.write(to: tmpFile)
                         DispatchQueue.main.async {
-                            startAnalysis(url: tmpFile)
+                            if mode == .analyze {
+                                startAnalysis(url: tmpFile)
+                            } else {
+                                startSearch(url: tmpFile)
+                            }
                         }
                     }
                 }
@@ -515,7 +850,7 @@ struct ContentView: View {
         return false
     }
 
-    private func startAnalysis(url: URL) {
+    private func startAnalysis(url: URL, timeSig: String? = nil) {
         guard case .running = server.status else {
             errorMessage = "服务器未就绪，请先连接引擎"
             analysisState = .error
@@ -523,6 +858,7 @@ struct ContentView: View {
         }
 
         let isSecurityScoped = url.startAccessingSecurityScopedResource()
+        lastAudioURL = url
 
         withAnimation {
             analysisState = .uploading
@@ -534,10 +870,11 @@ struct ContentView: View {
             defer { if isSecurityScoped { url.stopAccessingSecurityScopedResource() } }
             do {
                 withAnimation { analysisState = .analyzing }
-                let r = try await APIClient.analyze(audioURL: url)
+                let r = try await APIClient.analyze(audioURL: url, timeSig: timeSig)
                 await MainActor.run {
                     withAnimation {
                         result = r
+                        selectedTimeSig = r.timeSig
                         analysisState = .done
                     }
                 }
@@ -552,11 +889,62 @@ struct ContentView: View {
         }
     }
 
+    private func reanalyzeWithTS(url: URL, timeSig: String) {
+        startAnalysis(url: url, timeSig: timeSig)
+    }
+
     private func reset() {
         withAnimation {
             analysisState = .idle
             result = nil
             errorMessage = nil
+        }
+    }
+
+    private func resetAll() {
+        withAnimation {
+            analysisState = .idle
+            result = nil
+            errorMessage = nil
+            searchState = .idle
+            searchResult = nil
+            searchErrorMessage = nil
+        }
+    }
+
+    private func startSearch(url: URL) {
+        guard case .running = server.status else {
+            searchErrorMessage = "服务器未就绪，请先连接引擎"
+            searchState = .error
+            return
+        }
+
+        let isSecurityScoped = url.startAccessingSecurityScopedResource()
+
+        withAnimation {
+            searchState = .searching
+            searchErrorMessage = nil
+            searchResult = nil
+        }
+
+        Task {
+            defer { if isSecurityScoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let sr = try await APIClient.search(audioURL: url)
+                await MainActor.run {
+                    withAnimation {
+                        searchResult = sr
+                        searchState = .done
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    withAnimation {
+                        searchErrorMessage = error.localizedDescription
+                        searchState = .error
+                    }
+                }
+            }
         }
     }
 

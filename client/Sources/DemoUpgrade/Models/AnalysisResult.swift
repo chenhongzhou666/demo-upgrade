@@ -68,3 +68,60 @@ struct AnalysisResult: Codable, Equatable {
         chords.compactMap { $0.warning }.filter { !$0.isEmpty }
     }
 }
+
+// MARK: - 查重搜索
+
+struct SearchTrack: Codable, Identifiable {
+    let id: String
+    let title: String
+    let composer: String
+    let keyName: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, composer
+        case keyName = "key_name"
+    }
+}
+
+struct SearchResultItem: Codable, Identifiable {
+    let track: SearchTrack
+    let matchCount: Int
+    let containment: Double
+    let jaccard: Double
+
+    enum CodingKeys: String, CodingKey {
+        case track
+        case matchCount = "match_count"
+        case containment, jaccard
+    }
+
+    var id: String { track.id }
+
+    /// 0-100 相似度 (取 containment 和 jaccard 的加权组合)
+    var similarityPercent: Int {
+        Int((containment * 0.6 + jaccard * 0.4) * 100)
+    }
+}
+
+struct SearchResponse: Codable {
+    let query: SearchQuery
+    let results: [SearchResultItem]
+    let librarySize: Int
+
+    enum CodingKeys: String, CodingKey {
+        case query, results
+        case librarySize = "library_size"
+    }
+}
+
+struct SearchQuery: Codable {
+    let totalNotes: Int
+    let hashCount: Int
+    let ngramSize: Int
+
+    enum CodingKeys: String, CodingKey {
+        case totalNotes = "total_notes"
+        case hashCount = "hash_count"
+        case ngramSize = "ngram_size"
+    }
+}

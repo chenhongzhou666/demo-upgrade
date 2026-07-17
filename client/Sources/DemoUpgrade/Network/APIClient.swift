@@ -18,12 +18,53 @@ enum APIClient {
 
     // MARK: - Analyze
 
-    static func analyze(audioURL: URL) async throws -> AnalysisResult {
+    static func analyze(audioURL: URL, timeSig: String? = nil) async throws -> AnalysisResult {
         let boundary = UUID().uuidString
         var request = URLRequest(url: URL(string: "\(ServerConfig.baseURL)/api/analyze")!)
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 120
+
+        let audioData = try Data(contentsOf: audioURL)
+        let filename = audioURL.lastPathComponent
+
+        var body = Data()
+        // audio 字段
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"audio\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: application/octet-stream\r\n\r\n".data(using: .utf8)!)
+        body.append(audioData)
+        body.append("\r\n".data(using: .utf8)!)
+        // time_sig 字段（可选）
+        if let ts = timeSig {
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"time_sig\"\r\n\r\n".data(using: .utf8)!)
+            body.append("\(ts)\r\n".data(using: .utf8)!)
+        }
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        request.httpBody = body
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let httpResp = response as? HTTPURLResponse, httpResp.statusCode >= 400 {
+            if let errJson = try? JSONDecoder().decode([String: String].self, from: data),
+               let msg = errJson["error"] {
+                throw NSError(domain: "API", code: httpResp.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: msg])
+            }
+            throw NSError(domain: "API", code: httpResp.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "请求失败 (\(httpResp.statusCode))"])
+        }
+        return try JSONDecoder().decode(AnalysisResult.self, from: data)
+    }
+
+    // MARK: - Search
+
+    static func search(audioURL: URL) async throws -> SearchResponse {
+        let boundary = UUID().uuidString
+        var request = URLRequest(url: URL(string: "\(ServerConfig.baseURL)/api/search")!)
+        request.httpMethod = "POST"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 90
 
         let audioData = try Data(contentsOf: audioURL)
         let filename = audioURL.lastPathComponent
@@ -44,8 +85,8 @@ enum APIClient {
                     userInfo: [NSLocalizedDescriptionKey: msg])
             }
             throw NSError(domain: "API", code: httpResp.statusCode,
-                userInfo: [NSLocalizedDescriptionKey: "请求失败 (\(httpResp.statusCode))"])
+                userInfo: [NSLocalizedDescriptionKey: "搜索失败 (\(httpResp.statusCode))"])
         }
-        return try JSONDecoder().decode(AnalysisResult.self, from: data)
+        return try JSONDecoder().decode(SearchResponse.self, from: data)
     }
 }

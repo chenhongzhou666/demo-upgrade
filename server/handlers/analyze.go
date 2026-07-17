@@ -110,12 +110,18 @@ func Analyze(pythonBin, scriptPath string) http.HandlerFunc {
 		}
 		dst.Close()
 
+		// 手动拍号（可选）
+		timeSig := r.FormValue("time_sig")
+
 		// 运行 Python 引擎（120 秒超时）
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 
-		cmd := exec.CommandContext(ctx, pythonBin, scriptPath,
-			inputPath, "--output-dir", tmpDir, "--json")
+		engineArgs := []string{scriptPath, inputPath, "--output-dir", tmpDir, "--json"}
+		if timeSig != "" {
+			engineArgs = append(engineArgs, "--force-ts", timeSig)
+		}
+		cmd := exec.CommandContext(ctx, pythonBin, engineArgs...)
 		cmd.Env = os.Environ()
 
 		stdout, err := cmd.StdoutPipe()

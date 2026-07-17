@@ -377,7 +377,7 @@ def detect_pitches_basic_pitch(audio_path: str) -> tuple[list[dict], np.ndarray,
 # Step 3: 音乐分析
 # ══════════════════════════════════════════════════════════════════
 
-def analyse_music(notes: list[dict], audio: np.ndarray, sr: int) -> dict:
+def analyse_music(notes: list[dict], audio: np.ndarray, sr: int, force_ts: str | None = None) -> dict:
     import librosa
 
     onset_env = librosa.onset.onset_strength(y=audio, sr=sr)
@@ -457,16 +457,23 @@ def analyse_music(notes: list[dict], audio: np.ndarray, sr: int) -> dict:
     print(f"      [调性] {key_name} {mode} 调  (调号={'+' + str(fifths) if fifths > 0 else str(fifths)})")
 
     hop_length = 512
-    ts_result = _infer_time_signature(notes, onset_env, beat_times, sr, hop_length, bpm)
-    time_sig = ts_result['time_sig']
-    beats_per_measure = ts_result['numerator']
-    ts_confidence = ts_result['confidence']
-    if ts_confidence < 0.40:
-        print(f"      [拍号] {time_sig} 置信度过低 ({ts_confidence:.2f} < 0.40)，回退 4/4")
-        time_sig = '4/4'
-        beats_per_measure = 4
+
+    if force_ts:
+        time_sig = force_ts
+        beats_per_measure = int(force_ts.split('/')[0])
+        ts_confidence = 1.0  # 手动指定，置信度为 1
+        print(f"      [拍号] {time_sig}  (手动指定)")
     else:
-        print(f"      [拍号] {time_sig}  (置信度={ts_confidence:.2f})")
+        ts_result = _infer_time_signature(notes, onset_env, beat_times, sr, hop_length, bpm)
+        time_sig = ts_result['time_sig']
+        beats_per_measure = ts_result['numerator']
+        ts_confidence = ts_result['confidence']
+        if ts_confidence < 0.40:
+            print(f"      [拍号] {time_sig} 置信度过低 ({ts_confidence:.2f} < 0.40)，回退 4/4")
+            time_sig = '4/4'
+            beats_per_measure = 4
+        else:
+            print(f"      [拍号] {time_sig}  (置信度={ts_confidence:.2f})")
 
     quantized, _, tatum_sec, tatums_per_beat = _quantize_rhythm(notes, bpm, beat_times)
 
@@ -842,16 +849,12 @@ def notes_to_jianpu(notes: list[dict], key_name: str, mode: str) -> list[dict]:
         oct_offset = (n['midi'] - do_midi_4) // 12
         jianpu = str(degree)
 
+        # 简谱八度点：高八度上方加点(U+0307)，低八度下方加点(U+0323)
+        # 多个八度重复叠加（乐理：基础乐理第1-16课「音的分组」）
         if oct_offset > 0:
-            if oct_offset == 1:
-                jianpu += '̇'                # U+0307 combining dot above
-            else:
-                jianpu += '̈'                # U+0308 combining diaeresis (two dots above, visually stacked)
+            jianpu += '̇' * oct_offset
         elif oct_offset < 0:
-            if oct_offset == -1:
-                jianpu += '̣'                # U+0323 combining dot below
-            else:
-                jianpu += '̤'                # U+0324 combining diaeresis below (two dots below, visually stacked)
+            jianpu += '̣' * (-oct_offset)
         if acc:
             jianpu = acc + jianpu
 
@@ -870,11 +873,72 @@ def _find_nearest_degree(pc: int, pc_to_degree: dict[int, int]) -> tuple[int, st
     return 1, '#'
 
 
+def _add_jianpu_rhythm(jp: str, dur_beats: float) -> str:
+    """给简谱数字添加节奏记号——附点(.)和下划线(减时线)。
+
+    乐理依据：基础乐理第39-44课（音符时值体系、附点、复附点）
+    - 四分音符(1拍): 无标记
+    - 八分音符(0.5拍): 单下划线 U+0332
+    - 十六分音符(0.25拍): 双下划线
+    - 三十二分音符(0.125拍): 三下划线
+    - 附点: 延长一半时值，在数字后加 '.'
+    - 复附点: 再延长一半，两个 '.'
+    """
+    UNDERLINE = '̲'  # combining low line
+
+    # 确定是否附点音符 (dur ≈ 标准时值 × 1.5 或 × 1.75)
+    is_dotted = False
+    is_double_dotted = False
+    base_dur = dur_beats
+
+    for std_dur in [4.0, 2.0, 1.0, 0.5, 0.25, 0.125]:
+        if abs(dur_beats - std_dur * 1.75) < 0.03:
+            is_double_dotted = True
+            base_dur = std_dur
+            break
+        if abs(dur_beats - std_dur * 1.5) < 0.03:
+            is_dotted = True
+            base_dur = std_dur
+            break
+
+    if not is_dotted and not is_double_dotted:
+        for std_dur in [4.0, 2.0, 1.0, 0.5, 0.25, 0.125]:
+            if abs(dur_beats - std_dur) < 0.03:
+                base_dur = std_dur
+                break
+
+    # 下划线层数（减时线）
+    underline = 0
+    if base_dur <= 0.5:
+        underline = 1
+    if base_dur <= 0.25:
+        underline = 2
+    if base_dur <= 0.125:
+        underline = 3
+
+    result = jp
+    if is_double_dotted:
+        result += '..'
+    elif is_dotted:
+        result += '.'
+    result += UNDERLINE * underline
+    return result
+
+
 def format_jianpu(jianpu_notes: list[dict], key_name: str, mode: str, time_sig: str = '4/4') -> str:
-    """音值组合法格式化简谱: 以拍为组、长音增时线、半小节分隔、休止符 0"""
+    """音值组合法格式化简谱：支持子拍位、节奏记号、附点、增时线。
+
+    乐理依据：
+    - 基础乐理第41课：小节、小节线、终止线
+    - 基础乐理第39-42课：拍号、音符时值体系
+    - 基础乐理第43-44课：附点、复附点
+    - 基础乐理第49-50课：音值组合法，半小节为组
+    """
     from collections import defaultdict
 
     numerator = int(time_sig.split('/')[0])
+    SUBDIV = 4  # 16分音符分辨率（一拍4份）
+
     lines = [f"     [简谱] 1 = {key_name}  {time_sig}"]
 
     measures = defaultdict(list)
@@ -882,45 +946,80 @@ def format_jianpu(jianpu_notes: list[dict], key_name: str, mode: str, time_sig: 
         measures[n.get('measure', 1)].append(n)
 
     for m_num in sorted(measures.keys()):
-        # 以拍为单位建立网格
-        beat_slots = [[] for _ in range(numerator)]
+        # 按拍位 + 子拍位分组
+        beat_groups = [[] for _ in range(numerator)]
 
         for n in measures[m_num]:
             jp = n.get('jianpu', '?')
-            beat_in_meas = n.get('beat_in_measure', 1)  # 1-indexed
-            dur = n.get('duration_beats', 1)
+            bi = n.get('beat_in_measure', 1.0)
+            dur = n.get('duration_beats', 1.0)
 
-            bi = int(beat_in_meas) - 1  # 0-indexed beat
-            if 0 <= bi < numerator:
-                beat_slots[bi].append(jp)
+            beat_idx = int(bi) - 1  # 0-indexed beat
+            # 子拍位：0=正拍, 1=第2个16分, 2=第3个, 3=第4个
+            sub_pos = int(round((bi - int(bi) if bi >= 1.0 else bi) * SUBDIV))
 
-            # 增时线: 跨拍延长
-            for d in range(1, min(int(dur), numerator - bi)):
-                beat_slots[bi + d].append('-')
+            if 0 <= beat_idx < numerator:
+                beat_groups[beat_idx].append({
+                    'jp': jp,
+                    'sub_pos': sub_pos,
+                    'dur': dur,
+                    'start_beat': bi,
+                })
 
-        # 每拍渲染为一个 token
         beat_tokens = []
-        for b in range(numerator):
-            non_dash = [x for x in beat_slots[b] if x != '-']
-            dashes = [x for x in beat_slots[b] if x == '-']
+        for beat_idx, bg in enumerate(beat_groups):
+            if not bg:
+                beat_tokens.append('0')
+                continue
 
-            if not beat_slots[b]:
-                beat_tokens.append('0')              # 休止符
-            elif len(non_dash) <= 1:
-                # 单音或单音+增时线
-                beat_tokens.append(beat_slots[b][0])
-            else:
-                # 同拍内多音: 去重同音级泛音，和弦用 / 分隔
-                seen_base = set()
-                unique = []
-                for x in non_dash:
-                    base = x.lstrip('#b')[0]  # 提取音级数字 (去除升降号和八度点)
-                    if base not in seen_base:
-                        seen_base.add(base)
-                        unique.append(x)
-                beat_tokens.append('/'.join(unique))
+            # 按子拍位排序
+            bg.sort(key=lambda x: x['sub_pos'])
 
-        # 音值组合: 半小节分隔 (4/4 在 2-3 拍间加宽间距)
+            # 同子拍位归组（同位置 = 柱式和弦）
+            sub_groups = []
+            i = 0
+            while i < len(bg):
+                g = [bg[i]]
+                j = i + 1
+                while j < len(bg) and bg[j]['sub_pos'] == bg[i]['sub_pos']:
+                    g.append(bg[j])
+                    j += 1
+                sub_groups.append(g)
+                i = j
+
+            # 渲染每个子拍组
+            rendered = []
+            for sg in sub_groups:
+                if len(sg) == 1:
+                    n = sg[0]
+                    rendered.append(_add_jianpu_rhythm(n['jp'], n['dur']))
+                else:
+                    # 和弦：/ 分隔，去重同音级
+                    jps = []
+                    seen = set()
+                    for n in sg:
+                        base = n['jp'].lstrip('#b')[0]
+                        if base not in seen:
+                            seen.add(base)
+                            jps.append(_add_jianpu_rhythm(n['jp'], n['dur']))
+                    rendered.append('/'.join(jps))
+
+            # 同拍内连续子拍 → 拼在一起（减时线自动连接的感觉）
+            beat_tokens.append(''.join(rendered))
+
+        # 增时线：跨拍延长
+        for i, bt in enumerate(beat_tokens):
+            if bt and bt != '0':
+                # 查找是否有长音需要后续拍的增时线
+                for n in beat_groups[i]:
+                    dur = n['dur']
+                    bi = n['start_beat']
+                    total_beats_needed = int(dur + (bi - int(bi)) + 0.99)
+                    for eb in range(1, min(total_beats_needed, numerator - i)):
+                        if beat_tokens[i + eb] == '0' or not beat_tokens[i + eb]:
+                            beat_tokens[i + eb] = '-'
+
+        # 音值组合：半小节分隔
         if numerator >= 4 and numerator % 2 == 0:
             half = numerator // 2
             left = '  '.join(beat_tokens[:half])
@@ -1260,7 +1359,7 @@ def _cleanup_generated_files(output_dir: str, keep: bool, was_auto_test: bool):
                 os.remove(fp)
 
 
-def _run_pipeline_stem(audio_path: str, label: str, output_dir: str, use_pyin: bool) -> dict:
+def _run_pipeline_stem(audio_path: str, label: str, output_dir: str, use_pyin: bool, force_ts: str | None = None) -> dict:
     """单轨完整 Pipeline"""
     print(f"\n{'='*50}\n  {label}\n{'='*50}")
     notes, audio, sr = detect_pitches(audio_path, use_pyin)
@@ -1268,7 +1367,7 @@ def _run_pipeline_stem(audio_path: str, label: str, output_dir: str, use_pyin: b
         print(f"  ⚠ 未检测到音符")
         return {}
 
-    analysis = analyse_music(notes, audio, sr)
+    analysis = analyse_music(notes, audio, sr, force_ts=force_ts)
 
     # 和弦分组 + 识别 (传入调性上下文做等音拼写)
     groups = group_notes_into_chords(analysis['notes'])
@@ -1385,6 +1484,7 @@ def main():
     parser.add_argument('--pyin', action='store_true', help='PYIN 单音检测 (兼容模式)')
     parser.add_argument('--chords', action='store_true', help='生成和弦测试音频')
     parser.add_argument('--ts', help='拍号测试 (2/4|3/4|4/4|6/8)')
+    parser.add_argument('--force-ts', help='强制拍号 (2/4|3/4|4/4|6/8)，跳过自动推断')
     parser.add_argument('--band', action='store_true', help='多乐器混合测试')
     parser.add_argument('--separate', nargs='?', const='cpu', help='demucs 声源分离')
     parser.add_argument('--output-dir', default=os.path.dirname(os.path.abspath(__file__)),
@@ -1433,7 +1533,7 @@ def main():
         stem_results = []
         for s in stems:
             if not s['silent']:
-                a = _run_pipeline_stem(s['path'], s['name'].upper(), output_dir, use_pyin)
+                a = _run_pipeline_stem(s['path'], s['name'].upper(), output_dir, use_pyin, force_ts=args.force_ts)
                 stem_results.append({'label': s['name'], 'analysis': a})
 
         print(f"\n{'='*50}\n  汇总")
@@ -1444,7 +1544,7 @@ def main():
         if args.json:
             _print_separate_json_summary(stem_results)
     else:
-        analysis = _run_pipeline_stem(audio_path, '总谱', output_dir, use_pyin)
+        analysis = _run_pipeline_stem(audio_path, '总谱', output_dir, use_pyin, force_ts=args.force_ts)
         if analysis:
             bpm = analysis.get('bpm', 0)
             chords_list = analysis.get('chords', [])
