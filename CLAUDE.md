@@ -1164,6 +1164,52 @@ curl -X POST http://localhost:8090/api/analyze \
 # → {"key_name":"C","mode":"major","bpm":120,"time_sig":"4/4",...}
 ```
 
+#### 旋律查重 API（2026-07-17 新增）
+
+`POST /api/search` — 上传音频片段 → 提取音程 n-gram 指纹 → 倒排索引匹配 → 返回相似度排名。
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/health` | GET | 健康检查（含索引状态） |
+| `/api/analyze` | POST | 识谱分析 |
+| `/api/search` | POST | 旋律搜索/查重（新增） |
+
+**搜索架构：**
+
+```
+用户上传音频
+    ↓
+extract_fingerprint.py (引擎提取音符 → 音程序列 → n-gram 哈希)
+    ↓
+Go search.Index.Search() (倒排索引 match → Jaccard/Containment 排序)
+    ↓
+[{track_title, composer, containment, jaccard}, ...]
+```
+
+**指纹算法：** 音程 n-gram (n=2)，天然移调不变。SHA-256 → 64bit hash → Go map 倒排索引 O(1) 查找。
+
+**关键教训：** 参考指纹库**必须用引擎提取**，不能用 MIDI ground truth。引擎的检测误差在查询和参考中是同源的，互相抵消。MIDI→搜索 containment 仅 8%，Engine→搜索 57%（巴赫）/ 72%（肖邦）。
+
+**索引构建：**
+```bash
+cd engine
+# 批量构建（需跑引擎，每首 ~2 分钟）
+.venv-p2/bin/python3 build_index.py fingerprint_index.json \
+  test_set/bach_bwv846_original.wav "巴赫 前奏曲" "J.S. Bach" "C major" \
+  test_set/chopin_mazurka_original.wav "肖邦 玛祖卡" "F. Chopin" "C# minor" \
+  ...
+```
+
+**API 测试：**
+```bash
+# 搜索
+ffmpeg -i song.mp3 -t 15 excerpt.wav
+curl -X POST http://localhost:8090/api/search -F "audio=@excerpt.wav"
+# → {results: [{track: {title, composer}, containment: 0.57, jaccard: 0.31}, ...]}
+```
+
+**规模估算：** 10K 首曲 → ~6M hashes → ~50MB 内存 → Go map 直接撑住。不需要外部数据库。
+
 ### SwiftUI 客户端（2026-07-16 · 双平台）
 
 ```
