@@ -841,10 +841,17 @@ def notes_to_jianpu(notes: list[dict], key_name: str, mode: str) -> list[dict]:
 
         oct_offset = (n['midi'] - do_midi_4) // 12
         jianpu = str(degree)
+
         if oct_offset > 0:
-            jianpu += '̇' * oct_offset          # U+0307 combining dot above
+            if oct_offset == 1:
+                jianpu += '̇'                # U+0307 combining dot above
+            else:
+                jianpu += '̈'                # U+0308 combining diaeresis (two dots above, visually stacked)
         elif oct_offset < 0:
-            jianpu += '̣' * abs(oct_offset)     # U+0323 combining dot below
+            if oct_offset == -1:
+                jianpu += '̣'                # U+0323 combining dot below
+            else:
+                jianpu += '̤'                # U+0324 combining diaeresis below (two dots below, visually stacked)
         if acc:
             jianpu = acc + jianpu
 
