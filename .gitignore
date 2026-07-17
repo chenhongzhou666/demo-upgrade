@@ -33,3 +33,4 @@ client/DerivedData/
 
 # Security (contains auth tokens)
 www.bilibili.com_cookies.txt
+engine/fingerprint_index.json

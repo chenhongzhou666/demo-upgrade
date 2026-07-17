@@ -9,6 +9,7 @@ import (
 
 	"demo-upgrade/server/handlers"
 	"demo-upgrade/server/middleware"
+	"demo-upgrade/server/search"
 )
 
 func findEnginePath() string {
@@ -50,6 +51,16 @@ func main() {
 
 	analyzeHandler := handlers.Analyze(pythonBin, scriptPath)
 	mux.HandleFunc("POST /api/analyze", analyzeHandler)
+
+	// 加载旋律指纹索引
+	indexPath := filepath.Join(enginePath, "fingerprint_index.json")
+	searchIdx, err := search.LoadIndex(indexPath)
+	if err != nil {
+		fmt.Printf("⚠️  指纹索引加载失败 (搜索功能不可用): %v\n", err)
+	} else {
+		mux.HandleFunc("POST /api/search", handlers.Search(pythonBin, enginePath, searchIdx))
+		fmt.Printf("搜索索引: %d 首曲目\n", len(searchIdx.Tracks))
+	}
 
 	handler := middleware.Logging(mux)
 
